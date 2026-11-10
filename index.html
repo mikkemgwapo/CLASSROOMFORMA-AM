@@ -45,6 +45,10 @@ th{font-size:12px;text-transform:uppercase;color:var(--mu)}
 .err{color:var(--bad);font-size:13px;min-height:18px;margin-top:8px}
 .file-attach{margin-top:8px;padding:8px;background:rgba(0,0,0,0.04);border-radius:6px;font-size:13px}
 </style>
+<!-- Document Parser Libraries for PDF and DOCX -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.2/mammoth.browser.min.js"></script>
+<script>if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';</script>
 </head>
 <body>
 <div id="app" style="display:flex;flex:1;align-items:center;justify-content:center;width:100%"></div>
@@ -145,46 +149,86 @@ function soft(){
 }
 document.addEventListener('focusout',()=>{if(pend){pend=false;setTimeout(()=>{if(!taking)render()},300)}});
 
-/* ---------- AI Quiz Generator ---------- */
-function generate(text,n,types){
- const cleanText=text.replace(/[^a-zA-Z0-9\s.!?]/g,' ');
- const sents=cleanText.split(/(?<=[.!?])\s+/).map(s=>s.trim()).filter(s=>s.split(' ').length>=3);
- const words=[...new Set(cleanText.match(/[A-Za-z]{4,}/g)||[])];
- 
- if(!sents.length || words.length<3){
-  const defaultWords = words.length>=3 ? words : ['Concept', 'Theory', 'Analysis', 'Result', 'Principle', 'Process'];
-  const qs=[];
-  for(let i=0; i<n; i++){
-   const w = defaultWords[i % defaultWords.length];
-   const t = types[i % types.length];
+/* ---------- Content-Analyzed AI Quiz Generator with Difficulty Levels ---------- */
+function isTopicContent(str){
+ if(!str || str.trim().length < 4) return false;
+ // Strictly filter out school headers, metadata, administrative text, and dates
+ const metaPattern = /\b(school|university|college|department|faculty|campus|academy|teacher|instructor|professor|student|name|date|score|grade|class|section|subject|course|module|semester|term|quarter|exam|quiz|test|worksheet|assignment|page|header|footer|copyright|all rights reserved|www\.|http|email)\b/i;
+ if(metaPattern.test(str)) return false;
+ return true;
+}
+
+function generate(text, n, types, level){
+ const sentences = text.split(/(?<=[.!?])\s+/).map(s=>s.trim()).filter(s=>s.length >= 8);
+ const validSentences = sentences.filter(isTopicContent);
+ const words = [...new Set(text.match(/[A-Za-z]{4,}/g)||[])].filter(isTopicContent);
+ const qs = [];
+
+ validSentences.forEach((s, i)=>{
+  if(qs.length >= n) return;
+  const t = types[i % types.length];
+  const sWords = s.match(/[A-Za-z]{5,}/g);
+  if(!sWords) return;
+  
+  const validSWords = sWords.filter(isTopicContent);
+  if(validSWords.length === 0) return;
+
+  const key = validSWords.sort((a,b)=>b.length-a.length)[0];
+
+  if(level === 'Beginner'){
+   // Beginner level: simpler identification or direct true/false
+   if(t === 'tf'){
+    const fake = i % 2 === 1;
+    const other = words.find(x=>x.toLowerCase()!==key.toLowerCase()&&x.length>=4)||'item';
+    qs.push({t:'tf', q: fake ? s.replace(key, other) : s, a: fake ? 'False' : 'True'});
+   } else {
+    qs.push({t:'id', q: `Identify the main term referenced in: "${s.replace(key, '_____')}"`, a: key});
+   }
+  } else if(level === 'Advanced'){
+   // Advanced level: deeper analytical phrasing or complex blanks
+   if(t === 'tf'){
+    const fake = i % 2 === 1;
+    qs.push({t:'tf', q: `Critique statement: "${fake ? s.replace(key, 'anomaly') : s}" - Is this statement fundamentally accurate based on the text?`, a: fake ? 'False' : 'True'});
+   } else if(t === 'mc'){
+    const ch = [key, ...words.filter(x=>x.toLowerCase()!==key.toLowerCase()).sort(()=>Math.random()-.5).slice(0,3)].sort(()=>Math.random()-.5);
+    while(ch.length < 4) ch.push('Advanced Distractor ' + (ch.length+1));
+    qs.push({t:'mc', q: `Advanced Analysis: In the context of the material, evaluate and complete: ${s.replace(key, '_______')}`, ch, a: key});
+   } else {
+    qs.push({t:'id', q: `Advanced Identification: Provide the precise term omitted from: ${s.replace(key, '_______')}`, a: key});
+   }
+  } else {
+   // Intermediate level (Default)
    if(t==='tf'){
-    qs.push({t:'tf', q:`Is ${w} key to understanding ${cleanText.slice(0,30)}?`, a:'True'});
-   }else if(t==='mc'){
-    const ch = [w, ...defaultWords.filter(x=>x!==w).slice(0,3)].sort(()=>Math.random()-.5);
-    qs.push({t:'mc', q:`Select the primary topic associated with item ${i+1}:`, ch, a:w});
-   }else{
-    qs.push({t:'id', q:`Identify the term for item ${i+1}:`, a:w});
+    const fake = i % 2 === 1;
+    const other = words.find(x=>x.toLowerCase()!==key.toLowerCase()&&x.length>=4)||'concept';
+    qs.push({t:'tf', q: fake ? s.replace(key, other) : s, a: fake ? 'False' : 'True'});
+   } else if(t==='mc'){
+    const ch = [key, ...words.filter(x=>x.toLowerCase()!==key.toLowerCase()).sort(()=>Math.random()-.5).slice(0,3)].sort(()=>Math.random()-.5);
+    while(ch.length < 4) ch.push('Option ' + (ch.length+1));
+    qs.push({t:'mc', q: s.replace(key, '_____'), ch, a: key});
+   } else {
+    qs.push({t:'id', q: s.replace(key, '_____'), a: key});
    }
   }
-  return qs;
+ });
+
+ const fallbackPool = words.length >= 3 ? words : ['Concept', 'Principle', 'Analysis', 'Theory', 'Process', 'System'];
+ while(qs.length < n){
+  const idx = qs.length;
+  const w = fallbackPool[idx % fallbackPool.length];
+  const t = types[idx % types.length];
+  if(t==='tf'){
+   qs.push({t:'tf', q:`Is ${w} considered a primary focus of the lesson text?`, a:'True'});
+  } else if(t==='mc'){
+   const ch = [w, ...fallbackPool.filter(x=>x!==w).slice(0,3)].sort(()=>Math.random()-.5);
+   while(ch.length < 4) ch.push('None of the above');
+   qs.push({t:'mc', q:`Select the correct concept for item #${idx+1} (${level} level):`, ch, a:w});
+  } else {
+   qs.push({t:'id', q:`Identify the term for item #${idx+1}:`, a:w});
+  }
  }
 
- const qs=[];
- sents.forEach((s,i)=>{
-  if(qs.length>=n)return;
-  const t=types[i%types.length],w=s.match(/[A-Za-z]{5,}/g);
-  if(!w)return;
-  const key=w.sort((a,b)=>b.length-a.length)[0];
-  if(t==='tf'){
-   const fake=i%2===1,other=words.find(x=>x.toLowerCase()!==key.toLowerCase()&&x.length>=4)||'solution';
-   qs.push({t:'tf',q:fake?s.replace(key,other):s,a:fake?'False':'True'});
-  }else if(t==='mc'){
-   const ch=[key,...words.filter(x=>x.toLowerCase()!==key.toLowerCase()).sort(()=>Math.random()-.5).slice(0,3)].sort(()=>Math.random()-.5);
-   if(ch.length<2) ch.push('Option B', 'Option C', 'Option D');
-   qs.push({t:'mc',q:s.replace(key,'_____'),ch,a:key});
-  }else qs.push({t:'id',q:s.replace(key,'_____'),a:key});
- });
- return qs;
+ return qs.slice(0, n);
 }
 function grade(act,ans){let sc=0;act.qs.forEach((q,i)=>{if(String(ans[i]||'').trim().toLowerCase()===String(q.a).toLowerCase())sc++});return sc}
 
@@ -237,9 +281,12 @@ function loginView(){
  <div class="err">${esc(msg)}</div></div>`;
 }
 function onboardView(){
- return `<div class="login card" style="text-align:left"><h2>Welcome to LearnITAll, ${esc(authed.displayName||'')}</h2>
+ return `<div class="login card" style="text-align:left"><h2>Welcome to LearnITAll</h2>
  <p class="mu">Signed in as ${esc(authed.email)}</p>
  ${joinBanner()}
+ <label>Your Full Name</label><input id="myCustomName" value="${esc(me.name)}">
+ <button class="btn" onclick="updateMyName()" style="margin-bottom:16px">Save Name & Continue</button>
+ 
  <h3>Join a class as a student</h3>
  <label>Class join code (from your teacher)</label><input id="jc" value="${esc(joinCode||'')}">
  <button class="btn" onclick="joinByCode(val('jc'))">Join class</button>
@@ -248,6 +295,13 @@ function onboardView(){
  <button class="btn" onclick="addSec()">Create class</button>
  <div class="err">${esc(msg)}</div>
  <button class="btn s" onclick="logout()" style="margin-top:16px;width:100%">Sign out</button></div>`;
+}
+function updateMyName(){
+ const newName = val('myCustomName').trim();
+ if(!newName){msg='Please enter a valid name.';render();return;}
+ me.name = newName;
+ msg='';
+ render();
 }
 function joinBanner(){
  if(!joinCode||!joinInfo)return '';
@@ -362,7 +416,7 @@ function Materials(){
  <label>Title</label><input id="mt">
  <div class="row"><div><label>Level</label><select id="ml">${LEVELS.map(l=>`<option>${l}</option>`).join('')}</select></div>
  <div><label>Section</label><select id="ms">${S.sections.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div></div>
- <label>Lesson file (Any file format: PDF, DOCX, TXT, Images, etc.)</label>
+ <label>Lesson file (PDF, DOCX, TXT, Images, etc.)</label>
  <input type="file" id="mf" onchange="readFile(this)">
  <textarea id="mx" placeholder="Paste or type lesson content here"></textarea>
  <button class="btn" onclick="addMat()">Save lesson</button></div>
@@ -512,8 +566,38 @@ function readFile(inp){
  if(!val('mt')) document.getElementById('mt').value = f.name.replace(/\.[^.]+$/, '');
 
  const r=new FileReader();
+ 
+ if(f.name.endsWith('.pdf')){
+  r.onload=function(){
+   const typedarray = new Uint8Array(r.result);
+   pdfjsLib.getDocument(typedarray).promise.then(function(pdf){
+    let maxPages = pdf.numPages, countPromises = [];
+    for(let j=1; j<=maxPages; j++){
+     countPromises.push(pdf.getPage(j).then(p => p.getTextContent().then(tc => tc.items.map(i=>i.str).join(' '))));
+    }
+    return Promise.all(countPromises);
+   }).then(function(texts){
+    document.getElementById('mx').value = texts.join('\n');
+   }).catch(function(err){ console.error(err); });
+  };
+  r.readAsArrayBuffer(f);
+  uploadedFileMeta = { name: f.name, size: f.size, type: f.type };
+  return;
+ }
+ 
+ if(f.name.endsWith('.docx')){
+  r.onload=function(){
+   mammoth.extractRawText({arrayBuffer: r.result}).then(function(result){
+    document.getElementById('mx').value = result.value;
+   }).catch(function(err){ console.error(err); });
+  };
+  r.readAsArrayBuffer(f);
+  uploadedFileMeta = { name: f.name, size: f.size, type: f.type };
+  return;
+ }
+
  r.onload=()=>{
-  if (typeof r.result === 'string' && f.type.startsWith('text/')) {
+  if (typeof r.result === 'string' && (f.type.startsWith('text/') || f.name.endsWith('.txt') || f.name.endsWith('.md') || f.name.endsWith('.csv') || f.name.endsWith('.html'))) {
    document.getElementById('mx').value = r.result;
    uploadedFileMeta = null;
   } else {
@@ -521,7 +605,7 @@ function readFile(inp){
   }
  };
  
- if (f.type.startsWith('text/')) {
+ if (f.type.startsWith('text/') || f.name.endsWith('.txt') || f.name.endsWith('.md') || f.name.endsWith('.csv') || f.name.endsWith('.html')) {
   r.readAsText(f);
  } else {
   r.readAsDataURL(f);
@@ -550,9 +634,9 @@ function gen(){
  if(!sourceText && m.fileMeta && m.fileMeta.dataUrl && m.fileMeta.dataUrl.startsWith('data:text/')) {
   try { sourceText = atob(m.fileMeta.dataUrl.split(',')[1]); } catch(e){}
  }
- if(!sourceText) sourceText = m.title + ' ' + (m.fileMeta ? m.fileMeta.name : '');
+ if(!sourceText) sourceText = m.title;
  
- const qs=generate(sourceText, +val('gn')||5, types);
+ const qs=generate(sourceText, +val('gn')||5, types, m.level);
  draft={title:m.title+' Quiz',level:m.level,section:m.section,qs};render();
 }
 function publish(){
