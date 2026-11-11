@@ -523,7 +523,7 @@ async function viewFile(id){
   else vb.innerHTML='<div class="doc">This file type cannot be previewed here. Use the Download button.</div>';
  }catch(e){console.error(e);vb.innerHTML='<div class="doc">Could not preview this file. Use the Download button.</div>'}
 }
-const fileBar=m=>m.fileMeta?`<div class="file-attach"><b>${esc(m.fileMeta.name)}</b> (${Math.round((m.fileMeta.size||0)/1024)} KB)
+let fileBar=m=>m.fileMeta?`<div class="file-attach"><b>${esc(m.fileMeta.name)}</b> (${Math.round((m.fileMeta.size||0)/1024)} KB)
  ${m.fileMeta.dataUrl?`<button class="btn s" style="margin:0 0 0 8px;padding:4px 10px" onclick="viewFile('${m.id}')">Open</button>`:'<span class="mu"> &middot; file too large to attach, text only</span>'}</div>`:'';
 
 /* ---------- Views ---------- */
@@ -982,6 +982,219 @@ function submitAct(){
  col('subs').doc(a.id+'_'+me.id).set({act:a.id,section:a.section,student:me.id,answers:ans,score,total:a.qs.length,at:Date.now()}).catch(fail);
  taking=null;tab='My Scores';render();
 }
+</script>
+
+<script>
+/* LearnITAll add-on: math equations/functions, inline images, "Discuss this file".
+   Add-on: paste in its own script tag after the main script. */
+
+/* ---------- 1. Math reader: normalizer + safe evaluator (no eval) ---------- */
+const MFN={sin:Math.sin,cos:Math.cos,tan:Math.tan,sqrt:Math.sqrt,abs:Math.abs,ln:Math.log,log:Math.log10,exp:Math.exp};
+const SUP='⁰¹²³⁴⁵⁶⁷⁸⁹';
+function normMath(s){
+ return String(s||'').replace(/[−–—]/g,'-').replace(/[×·∙⋅]/g,'*').replace(/÷/g,'/').replace(/π/g,'pi')
+  .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g,'($1)/($2)').replace(/\\(cdot|times)/g,'*').replace(/\\(left|right)/g,'').replace(/[{}$]/g,m=>m==='$'?'':m==='{'?'(':')')
+  .replace(/√\s*(\([^)]*\)|[\w.]+)/g,(m,a)=>'sqrt('+a.replace(/^\(|\)$/g,'')+')')
+  .replace(new RegExp('['+SUP+']+','g'),m=>'^'+[...m].map(c=>SUP.indexOf(c)).join(''))
+  .replace(/\*\*/g,'^').replace(/(\d),(?=\d{3}\b)/g,'$1');
+}
+function mTok(s){
+ const T=[];
+ (normMath(s).match(/\d+\.?\d*|\.\d+|[a-zA-Z]+|[-+*\/^()]/g)||[]).forEach(x=>{
+  if(/^[a-zA-Z]+$/.test(x)&&x.length>1&&!MFN[x.toLowerCase()]&&x.toLowerCase()!=='pi')[...x].forEach(c=>T.push(c));else T.push(x);
+ });
+ return T;
+}
+const mVars=s=>[...new Set(mTok(s).filter(t=>/^[a-z]$/i.test(t)&&t.toLowerCase()!=='e').map(t=>t.toLowerCase()))];
+function mEval(s,vars={}){
+ const T=mTok(s);let p=0;
+ const expr=()=>{let v=term();while(T[p]==='+'||T[p]==='-'){const o=T[p++],r=term();v=o==='+'?v+r:v-r}return v};
+ const term=()=>{let v=unary();for(;;){const t=T[p];
+  if(t==='*'||t==='/'){p++;const r=unary();v=t==='*'?v*r:v/r}
+  else if(t!==undefined&&t!==')'&&t!=='+'&&t!=='-')v*=unary(); /* implicit: 2x, 3(x+1) */
+  else break}return v};
+ const unary=()=>{if(T[p]==='-'){p++;return -unary()}if(T[p]==='+'){p++;return unary()}return pw()};
+ const pw=()=>{const b=atom();if(T[p]==='^'){p++;return Math.pow(b,unary())}return b};
+ const atom=()=>{
+  const t=T[p++];if(t===undefined)throw 0;
+  if(t==='('){const v=expr();if(T[p++]!==')')throw 0;return v}
+  if(/^[\d.]/.test(t))return parseFloat(t);
+  const l=t.toLowerCase();
+  if(MFN[l]){let a;if(T[p]==='('){p++;a=expr();if(T[p++]!==')')throw 0}else a=pw();return MFN[l](a)}
+  if(l==='pi')return Math.PI;
+  if(l in vars)return vars[l];
+  if(l==='e')return Math.E;
+  throw 0;
+ };
+ const v=expr();if(p<T.length)throw 0;return v;
+}
+const safe=f=>{try{const v=f();return Number.isFinite(v)?v:null}catch(e){return null}};
+const fmt=n=>String(Math.round(n*1000)/1000);
+
+/* ---------- 2. Find functions / equations / expressions in lesson text ---------- */
+function scanMath(text){
+ const o={funcs:[],eqs:[],exprs:[],lines:new Set()};
+ String(text||'').split('\n').forEach(raw=>{
+  const l=raw.trim();if(l.length<3||l.length>140)return;
+  let s=normMath(l.replace(/^(\d+[.)]|[•●▪*-])\s+/,'')).replace(/[.?]\s*$/,'').replace(/\s*([()^+\-*\/=])\s*/g,'$1').trim();
+  if(!/^[\w\s.()+\-*\/^=]+$/.test(s)||!/[=+\-*\/^]/.test(s)||!/[a-z\d]/i.test(s))return;
+  if((s.match(/[a-z]{2,}/gi)||[]).some(w=>!MFN[w.toLowerCase()]&&w.toLowerCase()!=='pi'))return;
+  const eq=s.split('=');let m;
+  if(eq.length===2&&(m=s.match(/^([a-z])\(([a-z])\)=(.+)$/i))){o.funcs.push({name:m[1],v:m[2].toLowerCase(),body:m[3],line:s});o.lines.add(l);return}
+  if(eq.length===2&&eq[1]){const v=mVars(eq[0]+'+'+eq[1]);if(v.length===1){o.eqs.push({v:v[0],L:eq[0],R:eq[1],line:s});o.lines.add(l)}return}
+  if(eq.length===2)s=eq[0];
+  if(s.includes('=')||mVars(s).length)return;
+  if(/\d.*[+\-*\/^].*\d/.test(s)&&safe(()=>mEval(s))!==null){o.exprs.push({line:s});o.lines.add(l)}
+ });
+ return o;
+}
+function solveEq(e){
+ const g=x=>mEval(e.L,{[e.v]:x})-mEval(e.R,{[e.v]:x});
+ let g0,g1,g2,g3;try{g0=g(0);g1=g(1);g2=g(2);g3=g(3)}catch(x){return null}
+ if(![g0,g1,g2,g3].every(Number.isFinite))return null;
+ const a=(g2-2*g1+g0)/2,b=g1-g0-a,c=g0;
+ if(Math.abs(g3-(9*a+3*b+c))>1e-6)return null; /* only linear / quadratic */
+ if(Math.abs(a)<1e-9)return Math.abs(b)<1e-9?null:{lin:-c/b};
+ const d=b*b-4*a*c;if(d<0)return null;
+ const r=[(-b+Math.sqrt(d))/(2*a),(-b-Math.sqrt(d))/(2*a)];
+ return {quad:[Math.max(...r),Math.min(...r)]};
+}
+
+/* ---------- 3. Math question generator (mc / tf / identification, by level) ---------- */
+function mathItems(sc,lvl){
+ const R=(a,b)=>a+Math.floor(Math.random()*(b-a+1)),[lo,hi]=lvl==='Beginner'?[1,5]:lvl==='Advanced'?[-6,8]:[-4,6],out=[];
+ sc.funcs.forEach(f=>{
+  const F=x=>mEval(f.body,{[f.v]:x});
+  const poly=safe(()=>{const v=[0,1,2,3,4,5,6].map(F);
+   return Math.abs(v[5]-5*v[4]+10*v[3]-10*v[2]+5*v[1]-v[0])<1e-6&&Math.abs(v[6]-5*v[5]+10*v[4]-10*v[3]+5*v[2]-v[1])<1e-6?1:null});
+  for(let k=0;k<3;k++){const a=R(lo,hi),val=safe(()=>F(a));
+   if(val!==null)out.push({q:`Given ${f.line}, find ${f.name}(${a}).`,s:`Given ${f.line}, ${f.name}(${a}) = `,val})}
+  if(poly&&lvl==='Advanced'){const a=R(lo,hi),h=1e-3,val=safe(()=>(F(a+h)-F(a-h))/(2*h));
+   if(val!==null)out.push({q:`Given ${f.line}, find the derivative ${f.name}'(${a}).`,s:`Given ${f.line}, ${f.name}'(${a}) = `,val:Math.round(val*1e3)/1e3})}
+ });
+ sc.eqs.forEach(e=>{const r=solveEq(e);if(!r)return;
+  if(r.lin!==undefined)out.push({q:`Solve for ${e.v}: ${e.line}`,s:`The solution of ${e.line} is ${e.v} = `,val:r.lin});
+  else if(lvl!=='Beginner')out.push({q:`Find the larger root of ${e.line} (solve for ${e.v}).`,s:`The larger root of ${e.line} is ${e.v} = `,val:r.quad[0]})});
+ sc.exprs.forEach(e=>{const val=safe(()=>mEval(e.line));if(val!==null)out.push({q:`Evaluate: ${e.line}`,s:`${e.line} = `,val})});
+ return out;
+}
+function mathQuestions(sc,n,types,lvl){
+ const seen=new Set(),items=shuf(mathItems(sc,lvl)).filter(i=>!seen.has(i.q)&&seen.add(i.q)).slice(0,n);
+ return items.map((it,i)=>{
+  const t=types[i%types.length],a=fmt(it.val),hint=Number.isInteger(+a)?'':' (round to 3 decimals)';
+  if(t==='tf'){const f=Math.random()<.5;return {t:'tf',q:'True or False: '+it.s+(f?fmt(it.val+shuf([1,-1,2,-2,.5,10])[0]):a),a:f?'False':'True'}}
+  if(t==='mc'){
+   const ds=[...new Set(shuf([it.val+1,it.val-1,it.val+2,it.val-2,it.val*2,-it.val,it.val+10]).map(fmt))].filter(x=>x!==a).slice(0,3);
+   if(ds.length===3)return {t:'mc',q:it.q+hint,ch:shuf([a,...ds]),a};
+  }
+  return {t:'id',q:it.q+hint,a};
+ });
+}
+
+/* replaces gen(): math lines -> math questions, everything else -> your existing text generator */
+function gen(){
+ const m=S.materials.find(x=>x.id===val('gm'));if(!m){alert('Upload a lesson first.');return}
+ const t=val('gt'),types=t==='mix'?['mc','tf','id']:[t],text=(m.text||'').trim();
+ if(!text){alert('This lesson has no readable text. Paste the lesson text, or upload a PDF, DOCX, TXT or image that contains text.');return}
+ const lvl=val('gl')||m.level,n=+val('gn')||5,sc=scanMath(text),mq=mathQuestions(sc,n,types,lvl);
+ const tx=text.split('\n').filter(l=>!sc.lines.has(l.trim())).join('\n');
+ const want=Math.min(mq.length,Math.ceil(n/2)),r=generate(tx,n-want,types,lvl);
+ const use=Math.min(mq.length,Math.max(want,n-r.qs.length));
+ const qs=[...r.qs.slice(0,Math.max(n-use,0)),...mq.slice(0,use)];
+ if(!qs.length){alert(r.note||'Could not build questions from this lesson.');return}
+ const note=qs.length<n?`Only ${qs.length} good question(s) could be built (you asked for ${n}). Add more lesson text for more.`:'';
+ const concepts=[...(r.concepts||[]),...(mq.length?['equations & functions']:[])];
+ draft={title:m.title+' Quiz',level:lvl,section:m.section,qs,note,concepts};render();
+}
+
+/* numeric answers: 4 = 4.0 = "x = 4" = 8/2 (tolerance 0.01); everything else uses your old comparison */
+function grade(act,ans){
+ const num=s=>{s=String(s??'').replace(/^\s*[a-z]\s*=\s*/i,'').replace(/,/g,'').trim();return /^[\d\s.()+\-*\/^]+$/.test(s)?safe(()=>mEval(s)):null};
+ let sc=0;
+ act.qs.forEach((q,i)=>{const x=num(ans[i]),y=num(q.a);
+  if(x!==null&&y!==null?Math.abs(x-y)<=0.01:norm(ans[i])===norm(q.a))sc++});
+ return sc;
+}
+
+/* ---------- 4. Word equations (OMML) are skipped by mammoth, so read them from the .docx XML ---------- */
+async function docxMath(file){
+ if(!window.JSZip)await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+ const z=await JSZip.loadAsync(await file.arrayBuffer()),f=z.file('word/document.xml');if(!f)return [];
+ const d=new DOMParser().parseFromString(await f.async('string'),'application/xml');
+ const M='http://schemas.openxmlformats.org/officeDocument/2006/math',L=n=>n.localName,kid=(n,k)=>[...n.children].find(c=>L(c)===k);
+ const om=n=>{
+  if(L(n)==='t')return n.textContent;
+  const k=a=>{const c=kid(n,a);return c?om(c):''};
+  switch(L(n)){
+   case 'f':return `(${k('num')})/(${k('den')})`;
+   case 'sSup':return `${k('e')}^(${k('sup')})`;
+   case 'sSub':return `${k('e')}_${k('sub')}`;
+   case 'rad':return `sqrt(${k('e')})`;
+   case 'd':return '('+[...n.children].filter(c=>L(c)==='e').map(om).join(',')+')';
+  }
+  return [...n.children].map(om).join('');
+ };
+ const out=[];
+ [...d.getElementsByTagNameNS(M,'oMath')].forEach(n=>{
+  for(let p=n.parentNode;p;p=p.parentNode)if(p.localName==='oMath')return; /* skip nested */
+  const s=om(n).trim();if(s&&!out.includes(s))out.push(s);
+ });
+ return out;
+}
+const _readFile=readFile;
+window.readFile=async function(inp){
+ await _readFile(inp);
+ const f=inp.files[0];
+ if(f&&/\.docx$/i.test(f.name)){
+  fileBusy=true;
+  try{const eq=await docxMath(f);
+   if(eq.length){const mx=document.getElementById('mx');mx.value=(mx.value+'\n\n'+eq.join('\n')).trim();setStat('Ready. Also read '+eq.length+' Word equation(s).')}
+  }catch(e){console.error(e)}
+  fileBusy=false;
+ }
+};
+
+/* ---------- 5. Inline images + "Discuss" button (needs: const fileBar -> let fileBar) ---------- */
+const _fileBar=fileBar;
+fileBar=m=>{
+ const f=m.fileMeta,img=f&&f.dataUrl&&fileKind(f)==='img'
+  ?`<img src="${f.dataUrl}" alt="${esc(f.name)}" style="max-width:100%;max-height:320px;margin-top:8px;border-radius:8px;cursor:pointer" onclick="viewFile('${m.id}')">`:'';
+ return _fileBar(m)+img+`<div style="margin-top:6px"><button class="btn s" style="margin:0;padding:4px 10px" onclick="discuss('${m.id}')">Discuss</button></div>`;
+};
+function discuss(id){
+ const m=S.materials.find(x=>x.id===id);if(!m)return;
+ closeViewer();
+ const text=m.text||'',A=analyze(text),sc=scanMath(text),f=m.fileMeta;
+ window._dm={text,sc};
+ const vals=fn=>[0,1,2,3,4].map(x=>`${fn.name}(${x})=${(v=>v===null?'?':fmt(v))(safe(()=>mEval(fn.body,{[fn.v]:x})))}`).join(', ');
+ const sol=e=>{const r=solveEq(e);return r?(r.lin!==undefined?`${e.v} = ${fmt(r.lin)}`:`${e.v} = ${fmt(r.quad[0])} or ${fmt(r.quad[1])}`):'(not solvable here)'};
+ const ov=document.createElement('div');ov.id='viewer';ov.onclick=e=>{if(e.target===ov)closeViewer()};
+ ov.innerHTML=`<div class="vbox"><div class="vbar"><b>${esc(m.title)}</b><span>${f&&f.dataUrl?`<button class="btn s" onclick="viewFile('${m.id}')">Open file</button>`:''}<button class="btn s" onclick="closeViewer()">Close</button></span></div>
+ <div class="vbody"><div class="doc">
+ ${f&&f.dataUrl&&fileKind(f)==='img'?`<img src="${f.dataUrl}" alt="">`:''}
+ ${A.concepts.length?`<h3>Key concepts</h3>${A.concepts.map(c=>`<span class="chip">${esc(c)}</span>`).join('')}`:''}
+ ${A.defs.length?`<h3 style="margin-top:12px">Definitions</h3>${A.defs.slice(0,6).map(d=>`<p><b>${esc(d.term)}</b>: ${esc(d.def)}</p>`).join('')}`:''}
+ ${sc.funcs.length?`<h3 style="margin-top:12px">Functions</h3>${sc.funcs.map(x=>`<p><b>${esc(x.line)}</b><br><span class="mu">${esc(vals(x))}</span></p>`).join('')}`:''}
+ ${sc.eqs.length?`<h3 style="margin-top:12px">Equations</h3>${sc.eqs.map(e=>`<p><b>${esc(e.line)}</b> &rarr; ${esc(sol(e))}</p>`).join('')}`:''}
+ ${sc.exprs.length?`<h3 style="margin-top:12px">Expressions</h3>${sc.exprs.map(e=>`<p>${esc(e.line)} = <b>${fmt(safe(()=>mEval(e.line)))}</b></p>`).join('')}`:''}
+ <h3 style="margin-top:16px">Ask about this lesson</h3>
+ <p class="mu">Type a question, or something like f(3). Answers come from the lesson text itself.</p>
+ <div style="display:flex;gap:6px"><input id="dq" placeholder="e.g. What is photosynthesis?" onkeydown="if(event.key==='Enter')ask()"><button class="btn" style="margin:0" onclick="ask()">Ask</button></div>
+ <div id="da" style="margin-top:10px"></div></div></div></div>`;
+ document.body.appendChild(ov);
+}
+function ask(){
+ const q=val('dq').trim(),{text,sc}=window._dm,out=document.getElementById('da');if(!q)return;
+ let h='';
+ const c=q.match(/\b([a-zA-Z])\(\s*(-?\d+(?:\.\d+)?)\s*\)/),f=c&&sc.funcs.find(x=>x.name===c[1]);
+ if(f){const v=safe(()=>mEval(f.body,{[f.v]:+c[2]}));if(v!==null)h+=`<p><b>${esc(c[1])}(${esc(c[2])}) = ${fmt(v)}</b> <span class="mu">using ${esc(f.line)}</span></p>`}
+ const keys=toks(q).map(t=>t.w.toLowerCase()).filter(isKey);
+ const top=cleanLines(text).flatMap(splitSentences).map(s=>({s,n:keys.reduce((a,k)=>a+(s.toLowerCase().includes(k)?1:0),0)}))
+  .filter(x=>x.n>0).sort((a,b)=>b.n-a.n).slice(0,3);
+ h+=top.length?'<p class="mu">Most relevant parts of the lesson:</p>'+top.map(x=>`<div class="q">${esc(x.s)}</div>`).join(''):(f?'':'<p class="mu">I could not find that in this lesson.</p>');
+ out.innerHTML=h;
+}
+
 </script>
 </body>
 </html>
