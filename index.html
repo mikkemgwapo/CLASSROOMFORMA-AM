@@ -170,7 +170,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeViewer()});
    -> weight key concepts -> pick the best "teachable" sentences ->
    build questions with smart distractors, styled by difficulty level.
    ===================================================================== */
-const STOP=new Set(('a an the and or but if then else when while of at by for with about against between into through during before after above below to from up down in out on off over under again further once here there all any both each few more most other some such no nor not only own same so than too very can will just should now is are was were be been being have has had do does did this that these those it its they them their he she his her we our you your i me my also may might must shall would could which who whom whose what where why how as because since until although however therefore thus hence per via among within without upon one two three first second third many much called known using used make made often important different various include includes including example examples given based type types like well even still every another around usually generally sometimes ang ng sa na at ay mga ito para ni kay din rin ba po lang ko mo niya sila kami tayo kung kapag dahil pero ngunit pa').split(' '));
+const STOP=new Set(('a an the and or but if then else when while of at by for with about against between into through during before after above below to from up down in out on off over under again further once here there all any both each few more most other some such no nor not only own same so than too very can will just should now is are was were be been being have has had do does did this that these those it its they them their he she his her we our you your i me my also may might must shall would could which who whom whose what where why how as because since until although however therefore thus hence per via among within without upon one two three first second third many much called known using used make made often important different various include includes including example examples given based type types like well even still every another around usually generally sometimes ang ng sa na at ay mga ito para ni kay din rin ba po lang ko mo niya sila kami tayo kung kapag dahil pero ngunit pa review companion unit lesson chapter topic learning competency competencies target material materials day days objective objectives activity activities page contain contains produce produces occur occurs form forms replace replaces describe describes consist consists become becomes').split(' '));
 const cap=s=>s?s.charAt(0).toUpperCase()+s.slice(1):s;
 const reEsc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
 const shuf=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a};
@@ -195,8 +195,14 @@ function isNoiseLine(l){
  if(/^(mon|tues?|wednes|thurs?|fri|satur|sun)day,?\s/i.test(l)||/^[A-Za-z]+ \d{1,2},? \d{4}$/.test(l))return true;
  return false;
 }
+/* Only titles / unit / competency labels are filtered out. Everything else that is lesson content is kept:
+   full sentences, bullet points, equations, tables and ALL-CAPS slide lines. */
+const NOISE_SENT=/\b(learning competenc\w*|target competenc\w*|competenc(?:y|ies)|LC\s?\d+|learning objectives?|unit\s*\d+|chapter\s*\d+|lesson\s*\d+|module\s*\d+|days?\s*\d+\s*[-–—]\s*\d+|week\s*\d+)\b/i;
+const SYM=/[→←⇒=+|&\/]/;
+const capsHeavy=s=>{const w=(s.match(/\p{L}+/gu)||[]).filter(x=>x.length>=3);return w.length>=2&&w.filter(x=>x===x.toUpperCase()).length/w.length>0.5};
+const isFrag=s=>SYM.test(s)||capsHeavy(s);
 function cleanLines(raw){
- const lines=String(raw||'').replace(/\r/g,'').split('\n').map(l=>l.replace(/\s+/g,' ').trim());
+ const lines=String(raw||'').replace(/\r/g,'').replace(/[ \t]*[•●▪◦][ \t]*/g,'\n• ').split('\n').map(l=>l.replace(/\s+/g,' ').trim());
  const cnt={},key=l=>l.toLowerCase().replace(/\d+/g,'#');
  lines.forEach(l=>{if(l&&l.length<80)cnt[key(l)]=(cnt[key(l)]||0)+1});
  return lines.filter(l=>!l||(!(l.length<80&&cnt[key(l)]>=3)&&!isNoiseLine(l)));
@@ -230,12 +236,18 @@ function findDef(s){
 /* 3. Analyze the whole lesson */
 function analyze(raw){
  const lines=cleanLines(raw),sents=[],headK=new Set();let topic='',buf=[];
+ /* the document's title block (first line) is not lesson content */
+ const fi=lines.findIndex(l=>l);
+ if(fi>=0){const t=lines[fi];if(t.split(' ').length>=3&&t.length<=150&&!/[.!?:]$/.test(t)&&!/^(•|●|▪|\*|-|–|\d+[.)])\s/.test(t)&&!isFrag(t))lines[fi]=''}
  const flush=()=>{if(buf.length)splitSentences(buf.join(' ')).forEach(s=>sents.push({s,topic}));buf=[]};
+ const BUL=/^(•|●|▪|\*|-|–|\d+[.)])\s+/;
  lines.forEach(l=>{
   if(!l){flush();return}
-  const bullet=/^([\u2022\u25CF\u25AA*\-–]|\d+[.)])\s+/.test(l),b=l.replace(/^([\u2022\u25CF\u25AA*\-–]|\d+[.)])\s+/,'');
+  const bullet=BUL.test(l),b=l.replace(BUL,'');
   const wc=b.split(' ').length;
-  if(bullet&&wc>=4){flush();buf.push(/[.!?]$/.test(b)?b:b+'.');flush();return}
+  /* equations, tables, ALL-CAPS slide lines: each line is its own piece of content */
+  if(isFrag(b)){flush();sents.push({s:b,topic,frag:true});return}
+  if(bullet&&wc>=3){flush();splitSentences(b).forEach(s=>sents.push({s,topic}));return}
   if(b.length<70&&!/[.!?:,;]$/.test(b)&&wc<=8&&!/\b(is|are|was|were)\b/i.test(b)){
    flush();topic=b;toks(b).forEach(t=>isKey(t.w)&&headK.add(t.w.toLowerCase()));return;
   }
@@ -244,7 +256,7 @@ function analyze(raw){
  flush();
  const S2=sents.filter(x=>{
   const w=x.s.split(/\s+/).length;
-  return w>=6&&w<=45&&x.s.length<=300&&!/\?$/.test(x.s)&&!/^(figure|fig\.|table|source|note|example|exercise|question)\b/i.test(x.s);
+  return w>=3&&w<=60&&x.s.length<=320&&(x.s.match(/\p{L}{2,}/gu)||[]).length>=2&&!/\?$/.test(x.s)&&!/^(figure|fig\.|table\s*\d|source:)/i.test(x.s)&&!NOISE_SENT.test(x.s);
  });
  const freq={},bi={},capMid={},lowMid={},acr={};
  S2.forEach(({s})=>{
@@ -252,7 +264,7 @@ function analyze(raw){
   t.forEach((o,j)=>{
    if(!isKey(o.w))return;
    const l=o.w.toLowerCase();freq[l]=(freq[l]||0)+1;
-   if(/^\p{Lu}{2,6}$/u.test(o.w))acr[l]=o.w;
+   if(/^\p{Lu}{2,6}$/u.test(o.w)||/\p{Lu}/u.test(o.w.slice(1)))acr[l]=o.w;
    if(j>0){if(/^\p{Lu}/u.test(o.w)&&!/^\p{Lu}{2,}$/u.test(o.w))capMid[l]=(capMid[l]||0)+1;else lowMid[l]=(lowMid[l]||0)+1}
    if(j>0&&o.adj&&isKey(t[j-1].w)){const k=t[j-1].w.toLowerCase()+' '+l;bi[k]=(bi[k]||0)+1}
   });
@@ -290,7 +302,8 @@ function analyze(raw){
 /* 4. Distractors: same "shape" as the answer (single word / phrase / acronym, similar length), topical, never already in the sentence */
 function distractors(T,sent,A,need){
  const tl=T.k,low=sent.toLowerCase(),multi=tl.includes(' '),acr=/^\p{Lu}{2,6}$/u.test(T.disp);
- const pool=A.termList.filter(x=>x.k!==tl&&!low.includes(x.k)&&x.k.slice(0,5)!==tl.slice(0,5)&&!tl.includes(x.k)&&!x.k.includes(tl));
+ const isAc=x=>/^\p{Lu}{2,6}$/u.test(x.disp);
+ const pool=A.termList.filter(x=>(acr||!isAc(x))&&(x.k.length>=4||isAc(x))&&x.k!==tl&&!low.includes(x.k)&&x.k.slice(0,5)!==tl.slice(0,5)&&!tl.includes(x.k)&&!x.k.includes(tl));
  const score=x=>(x.k.includes(' ')===multi?2:0)+(/^\p{Lu}{2,6}$/u.test(x.disp)===acr?1:0)-Math.abs(x.k.length-tl.length)/6+Math.min(x.w,4)/2+Math.random();
  return pool.sort((a,b)=>score(b)-score(a)).slice(0,need).map(x=>x.disp);
 }
@@ -322,7 +335,7 @@ function mk(c,type,lvl,A,st){
     else nv=v+1+Math.floor(Math.random()*3);
     return nv===v?null:s.replace(m[0],String(nv));
    };
-   const swap=()=>{const d=distractors(T,s,A,1)[0];return d?sub(s,T.k,d):null};
+   const swap=()=>{if(!D&&s.toLowerCase().indexOf(T.k)>12)return null;const d=distractors(T,s,A,1)[0];return d?sub(s,T.k,d):null};
    const order=beg?[neg,swap,num]:adv?[num,swap,neg]:[swap,neg,num];
    for(const fn of order){const r=fn();if(r){stmt=r;ans='False';break}}
   }
