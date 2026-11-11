@@ -985,7 +985,7 @@ function submitAct(){
 </script>
 
 <script>
-/* LearnITAll add-on: math equations/functions, inline images, "Discuss this file".
+/* LearnITAll add-on: math equations/functions, word problems, inline images.
    Add-on: paste in its own script tag after the main script. */
 
 /* ---------- 1. Math reader: normalizer + safe evaluator (no eval) ---------- */
@@ -1168,49 +1168,13 @@ window.readFile=async function(inp){
  }
 };
 
-/* ---------- 5. Inline images + "Discuss" button (needs: const fileBar -> let fileBar) ---------- */
+/* ---------- 5. Inline image preview (needs: const fileBar -> let fileBar) ---------- */
 const _fileBar=fileBar;
 fileBar=m=>{
  const f=m.fileMeta,img=f&&f.dataUrl&&fileKind(f)==='img'
   ?`<img src="${f.dataUrl}" alt="${esc(f.name)}" style="max-width:100%;max-height:320px;margin-top:8px;border-radius:8px;cursor:pointer" onclick="viewFile('${m.id}')">`:'';
- return _fileBar(m)+img+`<div style="margin-top:6px"><button class="btn s" style="margin:0;padding:4px 10px" onclick="discuss('${m.id}')">Discuss</button></div>`;
+ return _fileBar(m)+img;
 };
-function discuss(id){
- const m=S.materials.find(x=>x.id===id);if(!m)return;
- closeViewer();
- const text=m.text||'',A=analyze(text),sc=scanMath(text),f=m.fileMeta;
- window._dm={text,sc};
- const vals=fn=>[0,1,2,3,4].map(x=>`${fn.name}(${x})=${(v=>v===null?'?':fmt(v))(safe(()=>mEval(fn.body,{[fn.v]:x})))}`).join(', ');
- const sol=e=>{const r=solveEq(e);return r?(r.lin!==undefined?`${e.v} = ${fmt(r.lin)}`:`${e.v} = ${fmt(r.quad[0])} or ${fmt(r.quad[1])}`):'(not solvable here)'};
- const ov=document.createElement('div');ov.id='viewer';ov.onclick=e=>{if(e.target===ov)closeViewer()};
- ov.innerHTML=`<div class="vbox"><div class="vbar"><b>${esc(m.title)}</b><span>${f&&f.dataUrl?`<button class="btn s" onclick="viewFile('${m.id}')">Open file</button>`:''}<button class="btn s" onclick="closeViewer()">Close</button></span></div>
- <div class="vbody"><div class="doc">
- ${f&&f.dataUrl&&fileKind(f)==='img'?`<img src="${f.dataUrl}" alt="">`:''}
- ${A.concepts.length?`<h3>Key concepts</h3>${A.concepts.map(c=>`<span class="chip">${esc(c)}</span>`).join('')}`:''}
- ${A.defs.length?`<h3 style="margin-top:12px">Definitions</h3>${A.defs.slice(0,6).map(d=>`<p><b>${esc(d.term)}</b>: ${esc(d.def)}</p>`).join('')}`:''}
- ${sc.funcs.length?`<h3 style="margin-top:12px">Functions</h3>${sc.funcs.map(x=>`<p><b>${esc(x.line)}</b><br><span class="mu">${esc(vals(x))}</span></p>`).join('')}`:''}
- ${sc.eqs.length?`<h3 style="margin-top:12px">Equations</h3>${sc.eqs.map(e=>`<p><b>${esc(e.line)}</b> &rarr; ${esc(sol(e))}</p>`).join('')}`:''}
- ${sc.exprs.length?`<h3 style="margin-top:12px">Expressions</h3>${sc.exprs.map(e=>`<p>${esc(e.line)} = <b>${fmt(safe(()=>mEval(e.line)))}</b></p>`).join('')}`:''}
- ${sc.words.length?`<h3 style="margin-top:12px">Word problems solved (${sc.words.length})</h3><table><tr><th>Problem</th><th>Expression</th><th>Answer</th></tr>${sc.words.map(w=>`<tr><td>${esc(w.line)}</td><td>${esc(w.e)}</td><td><b>${esc(showNum(w.v))}</b></td></tr>`).join('')}</table>`:''}
- <h3 style="margin-top:16px">Ask about this lesson</h3>
- <p class="mu">Type a question, paste a word problem, or try f(3). Answers come from the lesson text itself.</p>
- <div style="display:flex;gap:6px"><input id="dq" placeholder="e.g. What is photosynthesis?" onkeydown="if(event.key==='Enter')ask()"><button class="btn" style="margin:0" onclick="ask()">Ask</button></div>
- <div id="da" style="margin-top:10px"></div></div></div></div>`;
- document.body.appendChild(ov);
-}
-function ask(){
- const q=val('dq').trim(),{text,sc}=window._dm,out=document.getElementById('da');if(!q)return;
- let h='';
- const c=q.match(/\b([a-zA-Z])\(\s*(-?\d+(?:\.\d+)?)\s*\)/),f=c&&sc.funcs.find(x=>x.name===c[1]);
- if(f){const v=safe(()=>mEval(f.body,{[f.v]:+c[2]}));if(v!==null)h+=`<p><b>${esc(c[1])}(${esc(c[2])}) = ${fmt(v)}</b> <span class="mu">using ${esc(f.line)}</span></p>`}
- const w=solveWord(q);if(w)h+=`<p><b>Answer: ${esc(showNum(w.v))}</b> <span class="mu">${esc(w.e)}</span></p>`;
- const keys=toks(q).map(t=>t.w.toLowerCase()).filter(isKey);
- const top=cleanLines(text).flatMap(splitSentences).map(s=>({s,n:keys.reduce((a,k)=>a+(s.toLowerCase().includes(k)?1:0),0)}))
-  .filter(x=>x.n>0).sort((a,b)=>b.n-a.n).slice(0,3);
- h+=top.length?'<p class="mu">Most relevant parts of the lesson:</p>'+top.map(x=>`<div class="q">${esc(x.s)}</div>`).join(''):(f?'':'<p class="mu">I could not find that in this lesson.</p>');
- out.innerHTML=h;
-}
-
 /* ---------- 6. Word-problem solver: translates a sentence into an expression and solves it ---------- */
 function showNum(v){
  v=Math.round(v*1e6)/1e6;
