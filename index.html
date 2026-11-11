@@ -304,7 +304,6 @@ function mk(c,type,lvl,A,st){
  let T=c.terms[0];
  if(D)T=A.byK[D.k]||T;
  if(!T)return null;
- const hint=beg?` (Hint: ${T.disp.length} letters, starts with “${cap(T.disp[0])}”)`:'';
 
  if(type==='tf'){
   const wantFalse=st.tf%2===1;
@@ -350,9 +349,9 @@ function mk(c,type,lvl,A,st){
  }
 
  /* identification */
- if(D){const dq=blank(D.def,T.disp)||D.def;return {t:'id',q:`What term is described here: “${dq}”?${hint}`,a:T.disp,src:s}}
+ if(D){const dq=blank(D.def,T.disp)||D.def;return {t:'id',q:`What term is described here: “${dq}”?`,a:T.disp,src:s}}
  const b=blank(s,T.disp);if(!b)return null;
- return {t:'id',q:(adv?'Provide the missing term: ':'Fill in the blank: ')+b+hint,a:T.disp,src:s};
+ return {t:'id',q:(adv?'Provide the missing term: ':'Fill in the blank: ')+b,a:T.disp,src:s};
 }
 
 function generate(text,n,types,level){
@@ -427,7 +426,7 @@ async function viewFile(id){
   else vb.innerHTML='<div class="doc">This file type cannot be previewed here. Use the Download button.</div>';
  }catch(e){console.error(e);vb.innerHTML='<div class="doc">Could not preview this file. Use the Download button.</div>'}
 }
-const fileBar=m=>m.fileMeta?`<div class="file-attach">📎 <b>${esc(m.fileMeta.name)}</b> (${Math.round((m.fileMeta.size||0)/1024)} KB)
+const fileBar=m=>m.fileMeta?`<div class="file-attach"><b>${esc(m.fileMeta.name)}</b> (${Math.round((m.fileMeta.size||0)/1024)} KB)
  ${m.fileMeta.dataUrl?`<button class="btn s" style="margin:0 0 0 8px;padding:4px 10px" onclick="viewFile('${m.id}')">Open</button>`:'<span class="mu"> &middot; file too large to attach, text only</span>'}</div>`:'';
 
 /* ---------- Views ---------- */
@@ -610,12 +609,13 @@ function Materials(){
  <label>Lesson file (PDF, DOCX, TXT, Images, etc.)</label>
  <input type="file" id="mf" accept=".pdf,.docx,.txt,.md,.csv,.html,.htm,image/*" onchange="readFile(this)">
  <div class="mu" id="fstat" style="margin-top:4px"></div>
- <textarea id="mx" placeholder="Paste or type lesson content here (text from an uploaded file appears here so you can check it)"></textarea>
+ <textarea id="mx" placeholder="Paste or type lesson content here"></textarea>
  <button class="btn" onclick="addMat()">Save lesson</button></div>
- <div class="card"><h2>Lessons</h2>${S.materials.map(m=>`<div class="q"><span class="tag">${m.level}</span><b>${esc(m.title)}</b>
+ <div class="card"><h2>Lessons</h2>${S.materials.map(m=>`<div class="q" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+ <div style="flex:1;min-width:200px"><span class="tag">${m.level}</span><b>${esc(m.title)}</b>
  <span class="mu"> &middot; ${esc(secName(m.section))}</span>
- ${fileBar(m)}
- <button class="btn d" style="float:right;margin:0" onclick="delMat('${m.id}')">Delete</button></div>`).join('')||'<p class="mu">None yet.</p>'}</div>`;
+ ${fileBar(m)}</div>
+ <button class="btn d" style="margin:0" onclick="delMat('${m.id}')">Delete</button></div>`).join('')||'<p class="mu">None yet.</p>'}</div>`;
 }
 function CreateQuiz(){
  const S=scoped();
@@ -637,7 +637,6 @@ function CreateQuiz(){
   <label>Question</label><textarea style="min-height:50px" onchange="draft.qs[${i}].q=this.value">${esc(q.q)}</textarea>
   ${q.ch?`<label>Choices (one per line)</label><textarea style="min-height:70px" onchange="draft.qs[${i}].ch=this.value.split('\\n')">${esc(q.ch.join('\n'))}</textarea>`:''}
   <label>Answer key</label><input value="${esc(q.a)}" onchange="draft.qs[${i}].a=this.value">
-  ${q.src?`<div class="mu" style="margin-top:6px">Source sentence: ${esc(q.src)}</div>`:''}
   <button class="btn s" onclick="draft.qs.splice(${i},1);render()">Delete question</button></div>`).join('')}
   <button class="btn" onclick="publish()">Save &amp; publish</button></div>`;
  }
