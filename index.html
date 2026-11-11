@@ -1033,9 +1033,11 @@ const fmt=n=>String(Math.round(n*1000)/1000);
 
 /* ---------- 2. Find functions / equations / expressions in lesson text ---------- */
 function scanMath(text){
- const o={funcs:[],eqs:[],exprs:[],lines:new Set()};
+ const o={funcs:[],eqs:[],exprs:[],words:[],lines:new Set()};
  String(text||'').split('\n').forEach(raw=>{
-  const l=raw.trim();if(l.length<3||l.length>140)return;
+  const l=raw.trim();if(l.length<3)return;
+  const w=solveWord(l);if(w){if(!o.words.some(x=>x.line===l))o.words.push({line:l,...w});o.lines.add(l);return}
+  if(l.length>140)return;
   let s=normMath(l.replace(/^(\d+[.)]|[•●▪*-])\s+/,'')).replace(/[.?]\s*$/,'').replace(/\s*([()^+\-*\/=])\s*/g,'$1').trim();
   if(!/^[\w\s.()+\-*\/^=]+$/.test(s)||!/[=+\-*\/^]/.test(s)||!/[a-z\d]/i.test(s))return;
   if((s.match(/[a-z]{2,}/gi)||[]).some(w=>!MFN[w.toLowerCase()]&&w.toLowerCase()!=='pi'))return;
@@ -1076,15 +1078,27 @@ function mathItems(sc,lvl){
   if(r.lin!==undefined)out.push({q:`Solve for ${e.v}: ${e.line}`,s:`The solution of ${e.line} is ${e.v} = `,val:r.lin});
   else if(lvl!=='Beginner')out.push({q:`Find the larger root of ${e.line} (solve for ${e.v}).`,s:`The larger root of ${e.line} is ${e.v} = `,val:r.quad[0]})});
  sc.exprs.forEach(e=>{const val=safe(()=>mEval(e.line));if(val!==null)out.push({q:`Evaluate: ${e.line}`,s:`${e.line} = `,val})});
+ sc.words.forEach(w=>out.push({q:w.line,s:w.line+' The answer is ',val:w.v,e:w.e,fm:showNum}));
  return out;
+}
+function exprDistractors(e){
+ const rep={'+':['−','×'],'−':['+','÷'],'×':['÷','+'],'÷':['×','−']},out=new Set(),eq=e.includes('='),val=eq?null:safe(()=>mEval(e));
+ [...e].forEach((c,i)=>{if(rep[c])rep[c].forEach(r=>out.add(e.slice(0,i)+r+e.slice(i+1)))});
+ const nm=[...e.matchAll(/\d+(?:\.\d+)?/g)];
+ if(nm.length>=2){const x=nm[0],y=nm[nm.length-1];out.add(e.slice(0,x.index)+y[0]+e.slice(x.index+x[0].length,y.index)+x[0]+e.slice(y.index+y[0].length))}
+ return shuf([...out]).filter(c=>{if(c===e)return false;if(eq)return true;const v=safe(()=>mEval(c));return v!==null&&Math.abs(v-val)>1e-9});
 }
 function mathQuestions(sc,n,types,lvl){
  const seen=new Set(),items=shuf(mathItems(sc,lvl)).filter(i=>!seen.has(i.q)&&seen.add(i.q)).slice(0,n);
  return items.map((it,i)=>{
-  const t=types[i%types.length],a=fmt(it.val),hint=Number.isInteger(+a)?'':' (round to 3 decimals)';
-  if(t==='tf'){const f=Math.random()<.5;return {t:'tf',q:'True or False: '+it.s+(f?fmt(it.val+shuf([1,-1,2,-2,.5,10])[0]):a),a:f?'False':'True'}}
+  const F=it.fm||fmt,t=types[i%types.length],a=F(it.val),hint=Number.isInteger(+a)?'':a.includes('/')?' (fraction or decimal)':' (round to 3 decimals)';
+  if(it.e&&t==='mc'&&Math.random()<.5){ /* "translate" question: pick the right expression */
+   const ds=exprDistractors(it.e).slice(0,3);
+   if(ds.length===3)return {t:'mc',q:it.q+' Which expression translates this problem?',ch:shuf([it.e,...ds]),a:it.e};
+  }
+  if(t==='tf'){const f=Math.random()<.5;return {t:'tf',q:'True or False: '+it.s+(f?F(it.val+shuf([1,-1,2,-2,.5,10])[0]):a),a:f?'False':'True'}}
   if(t==='mc'){
-   const ds=[...new Set(shuf([it.val+1,it.val-1,it.val+2,it.val-2,it.val*2,-it.val,it.val+10]).map(fmt))].filter(x=>x!==a).slice(0,3);
+   const ds=[...new Set(shuf([it.val+1,it.val-1,it.val+2,it.val-2,it.val*2,-it.val,it.val+10].filter(x=>it.val<0||x>=0)).map(F))].filter(x=>x!==a).slice(0,3);
    if(ds.length===3)return {t:'mc',q:it.q+hint,ch:shuf([a,...ds]),a};
   }
   return {t:'id',q:it.q+hint,a};
@@ -1103,7 +1117,7 @@ function gen(){
  const qs=[...r.qs.slice(0,Math.max(n-use,0)),...mq.slice(0,use)];
  if(!qs.length){alert(r.note||'Could not build questions from this lesson.');return}
  const note=qs.length<n?`Only ${qs.length} good question(s) could be built (you asked for ${n}). Add more lesson text for more.`:'';
- const concepts=[...(r.concepts||[]),...(mq.length?['equations & functions']:[])];
+ const concepts=[...(r.concepts||[]),...(mq.length?['equations, functions & word problems']:[])];
  draft={title:m.title+' Quiz',level:lvl,section:m.section,qs,note,concepts};render();
 }
 
@@ -1177,8 +1191,9 @@ function discuss(id){
  ${sc.funcs.length?`<h3 style="margin-top:12px">Functions</h3>${sc.funcs.map(x=>`<p><b>${esc(x.line)}</b><br><span class="mu">${esc(vals(x))}</span></p>`).join('')}`:''}
  ${sc.eqs.length?`<h3 style="margin-top:12px">Equations</h3>${sc.eqs.map(e=>`<p><b>${esc(e.line)}</b> &rarr; ${esc(sol(e))}</p>`).join('')}`:''}
  ${sc.exprs.length?`<h3 style="margin-top:12px">Expressions</h3>${sc.exprs.map(e=>`<p>${esc(e.line)} = <b>${fmt(safe(()=>mEval(e.line)))}</b></p>`).join('')}`:''}
+ ${sc.words.length?`<h3 style="margin-top:12px">Word problems solved (${sc.words.length})</h3><table><tr><th>Problem</th><th>Expression</th><th>Answer</th></tr>${sc.words.map(w=>`<tr><td>${esc(w.line)}</td><td>${esc(w.e)}</td><td><b>${esc(showNum(w.v))}</b></td></tr>`).join('')}</table>`:''}
  <h3 style="margin-top:16px">Ask about this lesson</h3>
- <p class="mu">Type a question, or something like f(3). Answers come from the lesson text itself.</p>
+ <p class="mu">Type a question, paste a word problem, or try f(3). Answers come from the lesson text itself.</p>
  <div style="display:flex;gap:6px"><input id="dq" placeholder="e.g. What is photosynthesis?" onkeydown="if(event.key==='Enter')ask()"><button class="btn" style="margin:0" onclick="ask()">Ask</button></div>
  <div id="da" style="margin-top:10px"></div></div></div></div>`;
  document.body.appendChild(ov);
@@ -1188,11 +1203,103 @@ function ask(){
  let h='';
  const c=q.match(/\b([a-zA-Z])\(\s*(-?\d+(?:\.\d+)?)\s*\)/),f=c&&sc.funcs.find(x=>x.name===c[1]);
  if(f){const v=safe(()=>mEval(f.body,{[f.v]:+c[2]}));if(v!==null)h+=`<p><b>${esc(c[1])}(${esc(c[2])}) = ${fmt(v)}</b> <span class="mu">using ${esc(f.line)}</span></p>`}
+ const w=solveWord(q);if(w)h+=`<p><b>Answer: ${esc(showNum(w.v))}</b> <span class="mu">${esc(w.e)}</span></p>`;
  const keys=toks(q).map(t=>t.w.toLowerCase()).filter(isKey);
  const top=cleanLines(text).flatMap(splitSentences).map(s=>({s,n:keys.reduce((a,k)=>a+(s.toLowerCase().includes(k)?1:0),0)}))
   .filter(x=>x.n>0).sort((a,b)=>b.n-a.n).slice(0,3);
  h+=top.length?'<p class="mu">Most relevant parts of the lesson:</p>'+top.map(x=>`<div class="q">${esc(x.s)}</div>`).join(''):(f?'':'<p class="mu">I could not find that in this lesson.</p>');
  out.innerHTML=h;
+}
+
+/* ---------- 6. Word-problem solver: translates a sentence into an expression and solves it ---------- */
+function showNum(v){
+ v=Math.round(v*1e6)/1e6;
+ if(Number.isInteger(v)||Math.abs(v*10-Math.round(v*10))<1e-9)return String(v);
+ for(let d=2;d<=12;d++){const n=v*d;if(Math.abs(n-Math.round(n))<1e-9)return Math.round(n)+'/'+d}
+ return String(Math.round(v*1000)/1000);
+}
+function solveWord(raw){
+ const t=String(raw||'').replace(/^\s*(?:verbal phrase:|\d+[.)])\s*/i,'').replace(/(\d),(?=\d{3}\b)/g,'$1').replace(/₱/g,'').trim();
+ if(t.length<12||t.length>280)return null;
+ const L=t.toLowerCase();
+ if(!/\?|\bfind\b|\bhow\b|\bwhat\b|_{2,}/.test(L))return null;
+ const N=[...L.matchAll(/\d+(?:\.\d+)?/g)].map(x=>+x[0]),R=(e,v)=>Number.isFinite(v)?{e,v:Math.round(v*1e6)/1e6}:null;
+ let m;
+ /* number patterns: "2, 4, 6, 8, __" */
+ if(/_{2,}/.test(L)&&L.includes(':')){
+  const it=L.slice(L.lastIndexOf(':')+1).split(',').map(s=>s.replace(/[?.]/g,'').trim()),b=it.findIndex(s=>/^_+$/.test(s));
+  if(b<0||it.some((s,i)=>i!==b&&!/^-?\d+(\.\d+)?$/.test(s)))return null;
+  const a=it.map(Number);
+  if(b===it.length-1&&b>=2){
+   const x=a.slice(0,b),d=x.slice(1).map((v,i)=>v-x[i]),last=x[x.length-1];
+   if(d.every(q=>q===d[0]))return R(`${last} + ${d[0]}`,last+d[0]);
+   const dd=d.slice(1).map((v,i)=>v-d[i]);
+   if(dd.length&&dd.every(q=>q===dd[0])){const nd=d[d.length-1]+dd[0];return R(`${last} + ${nd}`,last+nd)}
+   return null;
+  }
+  if(b>0&&b<it.length-1){const p=a[b-1],q=a[b+1],d=(q-p)/2;return R(`${p} + ${d}`,p+d)}
+  return null;
+ }
+ /* unknown number */
+ if((m=L.match(/number plus (\d+) equals (\d+)/)))return R(`n + ${m[1]} = ${m[2]}`,m[2]-m[1]);
+ if((m=L.match(/number minus (\d+) equals (\d+)/)))return R(`n − ${m[1]} = ${m[2]}`,+m[2]+ +m[1]);
+ if(/number/.test(L)&&(m=L.match(/(?:multiplied by|times) (\d+)\D+(\d+)/)))return R(`${m[1]}n = ${m[2]}`,m[2]/m[1]);
+ if((m=L.match(/number divided by (\d+) equals (\d+)/)))return R(`n ÷ ${m[1]} = ${m[2]}`,m[2]*m[1]);
+ if((m=L.match(/double it, then add (\d+)\D+(\d+)/)))return R(`2n + ${m[1]} = ${m[2]}`,(m[2]-m[1])/2);
+ if((m=L.match(/if (\d+) are added\D+(\d+)/)))return R(`n + ${m[1]} = ${m[2]}`,m[2]-m[1]);
+ if((m=L.match(/if (\d+) are (?:removed|given away|taken away)\D+(\d+)/)))return R(`n − ${m[1]} = ${m[2]}`,+m[2]+ +m[1]);
+ if((m=L.match(/subtracts (\d+) and gets (\d+)/)))return R(`n − ${m[1]} = ${m[2]}`,+m[2]+ +m[1]);
+ if((m=L.match(/double it gives (\d+)/)))return R(`2n = ${m[1]}`,m[1]/2);
+ /* ratio */
+ if((m=L.match(/ratio of (\w+) to (\w+)(?: \w+)? is (\d+)\s*:\s*(\d+)/))){
+  const rest=[...L.replace(m[0],'').matchAll(/\d+(?:\.\d+)?/g)].map(x=>+x[0]),q=L.split(/[.?]/).filter(s=>s.trim()).pop()||'',a=+m[3],b=+m[4];
+  const part=q.includes(m[1])?a:q.includes(m[2])?b:null;
+  if(part!==null&&rest.length)return R(`${rest[0]} ÷ (${a} + ${b}) × ${part}`,rest[0]/(a+b)*part);
+ }
+ /* mixtures */
+ if(/mixed/.test(L)&&/solution|water/.test(L)){
+  const ps=[...L.matchAll(/(\d+(?:\.\d+)?)%[^()%]*\((\d+(?:\.\d+)?)\s*ml\)/g)];
+  if(ps.length)return R(ps.map(x=>`${x[1]/100} × ${x[2]}`).join(' + '),ps.reduce((s,x)=>s+x[1]/100*x[2],0));
+ }
+ /* percent, discount, tax, interest */
+ if((m=L.match(/(\d+(?:\.\d+)?)\s*%/))){
+  const base=(L.match(/\bof (\d+(?:\.\d+)?)/)||L.match(/(\d+(?:\.\d+)?)\s*peso/)||[])[1];
+  if(base)return R(`${m[1]/100} × ${base}`,m[1]/100*base);
+ }
+ /* proportion by cost */
+ if(/^if\b/.test(L)&&/cost/.test(L)&&/how much/.test(L)&&N.length===3)return R(`(${N[1]} ÷ ${N[0]}) × ${N[2]}`,N[1]/N[0]*N[2]);
+ /* work and rate */
+ if((m=L.match(/(\d+)\s+(?:people|persons?|workers?|men)\b[^?]*?(\d+)\s+days?\b[^?]*?(\d+)\s+(?:people|persons?|workers?|men)\b/)))return R(`(${m[1]} × ${m[2]}) ÷ ${m[3]}`,m[1]*m[2]/m[3]);
+ if((m=L.match(/(\d+) days?[^?]*?(\d+) days?[^?]*together/)))return R(`1 ÷ (1/${m[1]} + 1/${m[2]})`,1/(1/m[1]+1/m[2]));
+ if((m=L.match(/in (\d+) (?:days?|hours?)[.,]\s*(?:what part|what fraction)[^?]*in 1 (?:day|hour)/)))return R(`1/${m[1]}`,1/m[1]);
+ if((m=L.match(/in (\d+) days?\.\s*how much work is done in (\d+) days?/)))return R(`${m[2]} × (1/${m[1]})`,m[2]/m[1]);
+ if((m=L.match(/(\d+)\/(\d+) of a job per day[^?]*how many days/)))return R(`1 ÷ (${m[1]}/${m[2]})`,m[2]/m[1]);
+ if((m=L.match(/(\d+)\/(\d+) of a job in (\d+) days?\.\s*how much (?:per day|in 1 day)/)))return R(`(${m[1]}/${m[2]}) ÷ ${m[3]}`,m[1]/m[2]/m[3]);
+ if((m=L.match(/(\d+)\/(\d+) of a job daily\.\s*how much in (\d+) days?/)))return R(`${m[3]} × (${m[1]}/${m[2]})`,m[3]*m[1]/m[2]);
+ /* ages */
+ if(/\bold\b|\bages?\b/.test(L)){
+  if((m=L.match(/(twice|(\d+) times) as old/))&&(m[3]=L.match(/(\d+) years? old/))){const k=m[1]==='twice'?2:+m[2];return R(`${k} × ${m[3][1]}`,k*m[3][1])}
+  if((m=L.match(/(\d+) years older[^.]*\.[^.]*?(\d+) years old/)))return R(`${m[2]} + ${m[1]}`,+m[2]+ +m[1]);
+  if((m=L.match(/(\d+) years younger[^.]*\.[^.]*?(\d+) years old/)))return R(`${m[2]} − ${m[1]}`,m[2]-m[1]);
+  if(/sum of (?:the )?ages|sum of two ages|total age/.test(L)&&N.length>=2)return R(`${N[0]} − ${N[1]}`,N[0]-N[1]);
+ }
+ /* distance = speed × time (one or several legs) */
+ const dm=[...L.matchAll(/(\d+(?:\.\d+)?)\s*km\/h\s*for\s*(\d+(?:\.\d+)?)\s*hours?/g)];
+ if(dm.length)return R(dm.map(x=>`${x[1]} × ${x[2]}`).join(' + '),dm.reduce((s,x)=>s+x[1]*x[2],0));
+ /* area, perimeter, volume */
+ if(/\b(?:area|perimeter|volume)\b/.test(L)&&N.length){
+  const per=/perimeter/.test(L);
+  if(/volume/.test(L)){
+   if(/cube/.test(L)&&N.length===1)return R(`${N[0]} × ${N[0]} × ${N[0]}`,N[0]**3);
+   if(N.length===3)return R(`${N[0]} × ${N[1]} × ${N[2]}`,N[0]*N[1]*N[2]);
+  }else if(N.length===1&&/square/.test(L))return per?R(`4 × ${N[0]}`,4*N[0]):R(`${N[0]} × ${N[0]}`,N[0]*N[0]);
+  else if(N.length===2)return per?R(`2 × (${N[0]} + ${N[1]})`,2*(N[0]+N[1])):R(`${N[0]} × ${N[1]}`,N[0]*N[1]);
+ }
+ /* unit rate: speed, cost per item, daily wage */
+ if(N.length>=2&&/\b(?:speed|rate|wage|cost per|per)\b/.test(L)){
+  return /cost per|cost of (?:one|each)/.test(L)?R(`${N[1]} ÷ ${N[0]}`,N[1]/N[0]):R(`${N[0]} ÷ ${N[1]}`,N[0]/N[1]);
+ }
+ return null;
 }
 
 </script>
