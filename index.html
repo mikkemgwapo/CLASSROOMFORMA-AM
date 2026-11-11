@@ -296,95 +296,179 @@ function analyze(raw){
   return {...x,idx,terms:hits,score:sc};
  }).filter(c=>c.terms.length&&c.score>0);
  const concepts=[...termList].sort((a,b)=>b.w-a.w).slice(0,8).map(t=>t.disp);
- return {cands,termList,defs,byK:terms,concepts};
+ const partOf=new Set();Object.keys(bi).filter(k=>bi[k]>=2).forEach(k=>{const [w1,w2]=k.split(' ');if(freq[w1]<=bi[k]+1)partOf.add(w1);if(freq[w2]<=bi[k]+1)partOf.add(w2)});
+ const topicSet={};cands.forEach(c=>{(topicSet[c.topic]=topicSet[c.topic]||new Set());c.terms.forEach(t=>topicSet[c.topic].add(t.k))});
+ return {cands,termList,defs,byK:terms,concepts,topicSet,partOf};
 }
 
-/* 4. Distractors: same "shape" as the answer (single word / phrase / acronym, similar length), topical, never already in the sentence */
-function distractors(T,sent,A,need){
- const tl=T.k,low=sent.toLowerCase(),multi=tl.includes(' '),acr=/^\p{Lu}{2,6}$/u.test(T.disp);
- const isAc=x=>/^\p{Lu}{2,6}$/u.test(x.disp);
- const pool=A.termList.filter(x=>(acr||!isAc(x))&&(x.k.length>=4||isAc(x))&&x.k!==tl&&!low.includes(x.k)&&x.k.slice(0,5)!==tl.slice(0,5)&&!tl.includes(x.k)&&!x.k.includes(tl));
- const score=x=>(x.k.includes(' ')===multi?2:0)+(/^\p{Lu}{2,6}$/u.test(x.disp)===acr?1:0)-Math.abs(x.k.length-tl.length)/6+Math.min(x.w,4)/2+Math.random();
+/* 4. Distractors. Beginner = clearly different from the answer (easy to rule out).
+      Advanced = very close to the answer (same shape, similar length, same topic) so the learner must really know it. */
+function distractors(T,sent,A,need,level,topic){
+ const tl=T.k,low=sent.toLowerCase(),multi=tl.includes(' '),isAc=x=>/^\p{Lu}{2,6}$/u.test(x.disp),acr=isAc(T);
+ const near=A.topicSet&&A.topicSet[topic];
+ const pool=A.termList.filter(x=>(acr||!isAc(x))&&(x.k.length>=4||isAc(x))&&x.k!==tl&&!low.includes(x.k)&&x.k.slice(0,5)!==tl.slice(0,5)&&!tl.includes(x.k)&&!x.k.includes(tl)&&!(x.k.length>=5&&low.includes(x.k.slice(0,5)))&&!(A.partOf&&A.partOf.has(x.k)));
+ const easy=level==='Beginner',hard=level==='Advanced';
+ const score=x=>{
+  const same=(x.k.includes(' ')===multi?2:0)+(isAc(x)===acr?1:0)-Math.abs(x.k.length-tl.length)/6;
+  const topical=near&&near.has(x.k)?1.5:0;
+  const imp=Math.min(x.w,4)/2;
+  if(easy)return -same*0.8+imp*0.6+Math.random()*1.5;
+  if(hard)return same*1.5+topical*1.5+imp+Math.random()*0.5;
+  return same+topical*0.5+imp+Math.random();
+ };
  return pool.sort((a,b)=>score(b)-score(a)).slice(0,need).map(x=>x.disp);
 }
 const sub=(s,t,r)=>{const o=s.replace(new RegExp('(^|[^\\p{L}])'+reEsc(t)+'(?:s|es)?(?![\\p{L}])','giu'),(m,p)=>p+r);return o!==s?o:null};
 const blank=(s,t)=>sub(s,t,'_____');
 const fmtDef=d=>cap(d.replace(/[.!]+$/,''));
 
-/* 5. Build one question of a given type from an analyzed sentence */
+/* meaning-reversing words: used to make subtle false statements */
+const ANT=[['increase','decrease'],['increases','decreases'],['increased','decreased'],['higher','lower'],['more','less'],['greater','smaller'],['larger','smaller'],['faster','slower'],['before','after'],['above','below'],['always','never'],['positive','negative'],['gain','lose'],['gains','loses'],['absorb','release'],['absorbs','releases'],['absorbed','released'],['maximum','minimum'],['inside','outside'],['all','none']];
+function antonym(s){
+ for(const [a,b] of ANT)for(const [x,y] of [[a,b],[b,a]]){
+  const re=new RegExp('\\b'+x+'\\b','i'),m=s.match(re);
+  if(m)return s.replace(re,m[0][0]===m[0][0].toUpperCase()?cap(y):y);
+ }
+ return null;
+}
+
+/* 5. Build one question of a given type, written for the chosen difficulty level.
+      Beginner     : recall / recognition. Main concepts, short sentences, 3 clearly different choices, obvious false statements.
+      Intermediate : understanding. 4 related choices, definition matching both ways, fill-in-the-blank.
+      Advanced     : analysis. Details and relationships, 4 very close choices, "which statement is correct" with subtly altered
+                     statements, subtle false statements (reversed meaning, changed numbers, swapped secondary concept). */
 function mk(c,type,lvl,A,st){
  const s=c.s,D=c.def,beg=lvl==='Beginner',adv=lvl==='Advanced';
  let T=c.terms[0];
+ if(adv&&!D&&c.terms.length>1)T=[...c.terms.slice(0,3)].sort((a,b)=>(b.k.includes(' ')?1:0)-(a.k.includes(' ')?1:0)||b.k.length-a.k.length)[0];
  if(D)T=A.byK[D.k]||T;
  if(!T)return null;
+ const occ=t=>(s.match(new RegExp('(^|[^\\p{L}])'+reEsc(t.k)+'(?:s|es)?(?![\\p{L}])','giu'))||[]).length;
+ /* never blank a word that appears twice in the sentence (the other copy would give the answer away) */
+ if(!D&&type!=='tf'&&occ(T)>1){const alt=c.terms.find(t=>occ(t)===1);if(!alt)return null;T=alt}
+ const dis=(t,n)=>distractors(t,s,A,n,lvl,c.topic);
+ const nch=beg?2:3;
+
+ const fx={
+  neg:()=>{
+   if(/\b(not|no|never|cannot)\b|n't/i.test(s))return null;
+   const r=s.replace(/\b(is|are|was|were|can|does|do|will|has|have)\b/i,m=>m.toLowerCase()==='can'?(m[0]==='C'?'Cannot':'cannot'):m+' not');
+   return r!==s?r:null;
+  },
+  num:()=>{
+   const m=s.match(/\b\d+(?:\.\d+)?\b/);if(!m)return null;
+   const v=parseFloat(m[0]);let nv;
+   if(Number.isInteger(v)&&v>=1000&&v<=2100)nv=v+(Math.random()<.5?-1:1)*(3+Math.floor(Math.random()*20));
+   else if(v>=10)nv=Math.round(v*(Math.random()<.5?.5:2));
+   else nv=v+1+Math.floor(Math.random()*3);
+   return nv===v?null:s.replace(m[0],String(nv));
+  },
+  ant:()=>antonym(s),
+  swap:()=>{if(!D&&s.toLowerCase().indexOf(T.k)>12)return null;const d=dis(T,1)[0];return d?sub(s,T.k,d):null},
+  swap2:()=>{
+   const T2=c.terms.find(t=>t.k!==T.k&&!T.k.includes(t.k)&&!t.k.includes(T.k));
+   if(!T2)return null;
+   const d=distractors(T2,s,A,1,lvl,c.topic)[0];
+   return d?sub(s,T2.k,d):null;
+  }
+ };
+ const falsify=order=>{for(const k of order){const r=fx[k]();if(r&&r!==s)return r}return null};
 
  if(type==='tf'){
-  const wantFalse=st.tf%2===1;
   let stmt=s,ans='True';
-  if(wantFalse){
-   const neg=()=>{
-    if(/\b(not|no|never|cannot)\b|n't/i.test(s))return null;
-    const r=s.replace(/\b(is|are|was|were|can|does|do|will|has|have)\b/i,m=>m.toLowerCase()==='can'?(m[0]==='C'?'Cannot':'cannot'):m+' not');
-    return r!==s?r:null;
-   };
-   const num=()=>{
-    const m=s.match(/\b\d+(?:\.\d+)?\b/);if(!m)return null;
-    const v=parseFloat(m[0]);let nv;
-    if(Number.isInteger(v)&&v>=1000&&v<=2100)nv=v+(Math.random()<.5?-1:1)*(3+Math.floor(Math.random()*20));
-    else if(v>=10)nv=Math.round(v*(Math.random()<.5?.5:2));
-    else nv=v+1+Math.floor(Math.random()*3);
-    return nv===v?null:s.replace(m[0],String(nv));
-   };
-   const swap=()=>{if(!D&&s.toLowerCase().indexOf(T.k)>12)return null;const d=distractors(T,s,A,1)[0];return d?sub(s,T.k,d):null};
-   const order=beg?[neg,swap,num]:adv?[num,swap,neg]:[swap,neg,num];
-   for(const fn of order){const r=fn();if(r){stmt=r;ans='False';break}}
+  if(st.tf%2===1){
+   const r=falsify(beg?['neg','ant','swap']:adv?['ant','num','swap2','swap','neg']:['swap','ant','num','neg']);
+   if(r){stmt=r;ans='False'}
   }
   st.tf++;
-  return {t:'tf',q:(adv?'Based on the lesson, decide whether this statement is accurate: ':'True or False: ')+cap(stmt),a:ans,src:s};
+  return {t:'tf',q:(adv?'Decide whether this statement is accurate: ':'True or False: ')+cap(stmt),a:ans,src:s,_k:T.k};
  }
 
  if(type==='mc'){
-  if(D){
-   const od=A.defs.filter(x=>x.k!==D.k&&!x.def.toLowerCase().includes(T.k))
-    .sort((a,b)=>Math.abs(a.def.length-D.def.length)-Math.abs(b.def.length-D.def.length)).slice(0,6);
-   if(!beg&&od.length>=3&&st.mc++%2===0){
-    const right=fmtDef(D.def),ds=shuf(od).slice(0,3).map(x=>fmtDef(x.def));
-    return {t:'mc',q:`According to the lesson, which of the following best describes ${T.disp}?`,ch:shuf([right,...ds]),a:right,src:s};
+  /* Advanced: pick the one correct statement out of four near-identical ones */
+  if(adv&&!c.frag&&s.length<=220&&st.adv++%2===0){
+   const wrong=[],seen=new Set([s]);
+   for(const k of ['ant','num','neg','swap2','swap']){
+    const r=fx[k]();if(r&&!seen.has(r)){seen.add(r);wrong.push(r)}
+    if(wrong.length>=3)break;
    }
-   const ds=distractors(T,s,A,3);if(ds.length<3)return null;
+   if(wrong.length<3){
+    for(const d of dis(T,3)){
+     if(wrong.length>=3)break;
+     const r=sub(s,T.k,d);if(r&&!seen.has(r)){seen.add(r);wrong.push(r)}
+    }
+   }
+   if(wrong.length>=3)return {t:'mc',q:'Which of the following statements is correct?',ch:shuf([s,...wrong.slice(0,3).map(cap)]),a:s,src:s,_k:T.k};
+  }
+  if(D){
+   const od=A.defs.filter(x=>x.k!==D.k&&!x.def.toLowerCase().includes(T.k));
+   const words=d=>d.toLowerCase().split(/\W+/).filter(Boolean);
+   const dw=new Set(words(D.def));
+   const sim=x=>{const b=words(x.def);return b.filter(w=>dw.has(w)).length/(b.length+1)};
+   const lenD=x=>Math.abs(x.def.length-D.def.length);
+   if(!beg&&od.length>=3&&(adv||st.mc++%2===0)){
+    const pick=(adv?od.sort((a,b)=>sim(b)-sim(a)||lenD(a)-lenD(b)):od.sort((a,b)=>lenD(a)-lenD(b))).slice(0,6);
+    const right=fmtDef(D.def),ds=shuf(pick).slice(0,3).map(x=>fmtDef(x.def));
+    return {t:'mc',q:adv?`Which of the following most accurately describes ${T.disp}?`:`According to the lesson, which of the following best describes ${T.disp}?`,ch:shuf([right,...ds]),a:right,src:s,_k:T.k};
+   }
+   const ds=dis(T,nch);if(ds.length<nch)return null;
    const dq=blank(D.def,T.disp)||D.def;
-   return {t:'mc',q:`Which term matches this description: “${dq}”?`,ch:shuf([cap(T.disp),...ds.map(cap)]),a:cap(T.disp),src:s};
+   return {t:'mc',q:beg?`Which term means: “${dq}”?`:`Which term matches this description: “${dq}”?`,ch:shuf([cap(T.disp),...ds.map(cap)]),a:cap(T.disp),src:s,_k:T.k};
   }
   const b=blank(s,T.disp);if(!b)return null;
-  const ds=distractors(T,s,A,3);if(ds.length<3)return null;
-  const lead=beg?'Fill in the blank: ':adv?'Based on the lesson, choose the term that correctly completes the statement: ':'Choose the term that best completes the sentence: ';
-  return {t:'mc',q:lead+b,ch:shuf([cap(T.disp),...ds.map(cap)]),a:cap(T.disp),src:s};
+  const ds=dis(T,nch);if(ds.length<nch)return null;
+  const lead=beg?'Fill in the blank: ':adv?'Choose the term that correctly completes the statement: ':'Choose the term that best completes the sentence: ';
+  return {t:'mc',q:lead+b,ch:shuf([cap(T.disp),...ds.map(cap)]),a:cap(T.disp),src:s,_k:T.k};
  }
 
  /* identification */
- if(D){const dq=blank(D.def,T.disp)||D.def;return {t:'id',q:`What term is described here: “${dq}”?`,a:T.disp,src:s}}
+ if(D){
+  const dq=blank(D.def,T.disp)||D.def;
+  return {t:'id',q:(beg?'What term means: ':adv?'Name the term that fits this description: ':'What term is described here: ')+`“${dq}”?`,a:T.disp,src:s,_k:T.k};
+ }
  const b=blank(s,T.disp);if(!b)return null;
- return {t:'id',q:(adv?'Provide the missing term: ':'Fill in the blank: ')+b,a:T.disp,src:s};
+ return {t:'id',q:(adv?'Provide the missing term: ':'Fill in the blank: ')+b,a:T.disp,src:s,_k:T.k};
 }
 
 function generate(text,n,types,level){
  const lvl=LEVELS.includes(level)?level:'Intermediate',A=analyze(text);
- const rank=c=>c.score+(lvl==='Beginner'?(c.def?2:0)+(c.s.length<150?1.5:-1.5)
-  :lvl==='Advanced'?(c.terms.length>=2?1.5:0)+(c.s.length>=90?1.5:-1.5)+(c.def?-1:0):0);
- const ranked=[...A.cands].sort((a,b)=>rank(b)-rank(a));
- const st={tf:Math.floor(Math.random()*2),mc:0},out=[];
- for(const c of ranked){
-  if(out.length>=n)break;
-  for(let k=0;k<types.length;k++){
-   const q=mk(c,types[(out.length+k)%types.length],lvl,A,st);
-   if(q){out.push({q,idx:c.idx});break}
+ /* difficulty decides WHICH parts of the lesson are used */
+ const rank=c=>c.score+(lvl==='Beginner'
+  ?(c.def?3:0)+(c.s.length<130?2:c.s.length>180?-3:-1)+Math.min(c.terms[0].w,6)*0.3
+  :lvl==='Advanced'
+  ?(c.terms.length>=3?2:c.terms.length>=2?1:0)+(c.s.length>=100?2:-1.5)+(/\d/.test(c.s)?1.5:0)+(c.def?-1.5:0)
+  :0);
+ const st={tf:Math.floor(Math.random()*2),mc:0,adv:0},out=[],used=new Set(),topicN={};
+ /* spread the questions over different concepts and different parts of the lesson */
+ for(const strict of [true,false]){
+  let pool=A.cands.filter(c=>!out.some(o=>o.idx===c.idx));
+  while(out.length<n&&pool.length){
+   let best=null,bs=-1e9;
+   for(const c of pool){
+    const k1=c.terms[0].k;
+    if(strict&&used.has(k1))continue;
+    const pen=(used.has(k1)?4:0)+(c.topic?2*(topicN[c.topic]||0):0)
+     +c.terms.slice(0,3).filter(t=>used.has(t.k)).length*1.2+(out.some(o=>Math.abs(o.idx-c.idx)<=1)?2:0);
+    const sc=rank(c)-pen;
+    if(sc>bs){bs=sc;best=c}
+   }
+   if(!best)break;
+   pool=pool.filter(c=>c!==best);
+   for(let k=0;k<types.length;k++){
+    const q=mk(best,types[(out.length+k)%types.length],lvl,A,st);
+    if(q){
+     out.push({q,idx:best.idx});used.add(q._k);
+     best.terms.slice(0,2).forEach(t=>used.add(t.k));
+     topicN[best.topic]=(topicN[best.topic]||0)+1;break;
+    }
+   }
   }
  }
  out.sort((a,b)=>a.idx-b.idx);
- const qs=out.map(o=>o.q);
+ const qs=out.map(o=>{const {_k,...q}=o.q;return q});
  let note='';
- if(!qs.length)note='Could not find enough complete, topic-related sentences. Make sure the lesson text has full sentences (not just headings or a worksheet header).';
- else if(qs.length<n)note=`Only ${qs.length} good question(s) could be built from this lesson (you asked for ${n}). Add more lesson text with complete sentences for more.`;
+ if(!qs.length)note='Could not find enough lesson content to build questions. Make sure the lesson text is not only headings or a worksheet header.';
+ else if(qs.length<n)note=`Only ${qs.length} good question(s) could be built from this lesson (you asked for ${n}). Add more lesson text for more.`;
  return {qs,note,concepts:A.concepts};
 }
 
