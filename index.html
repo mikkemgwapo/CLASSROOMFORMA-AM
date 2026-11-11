@@ -24,6 +24,7 @@ textarea{min-height:110px}
 .btn:hover{background:var(--prh)}
 .btn.s{background:transparent;color:var(--tx);border:1px solid var(--br)}
 .btn.d{background:var(--bad)}
+a.btn{text-decoration:none;display:inline-block;font-size:14px}
 .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
 .tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;background:var(--pr);color:#fff;margin-right:4px}
 .mu{color:var(--mu);font-size:13px}
@@ -44,8 +45,21 @@ th{font-size:12px;text-transform:uppercase;color:var(--mu)}
 
 .err{color:var(--bad);font-size:13px;min-height:18px;margin-top:8px}
 .file-attach{margin-top:8px;padding:8px;background:rgba(0,0,0,0.04);border-radius:6px;font-size:13px}
+
+/* In-page file viewer */
+#viewer{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;display:flex;align-items:center;justify-content:center;padding:12px}
+.vbox{background:var(--card);color:var(--tx);border-radius:12px;width:100%;max-width:1000px;height:92vh;display:flex;flex-direction:column;overflow:hidden}
+.vbar{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--br);flex-wrap:wrap}
+.vbar .btn{margin:0 0 0 6px;padding:6px 12px}
+.vbody{flex:1;overflow:auto}
+.vbody iframe{width:100%;height:100%;border:0;background:#fff}
+.vbody .doc,.vbody pre{padding:16px;margin:0;white-space:pre-wrap;word-break:break-word;font:inherit}
+.vbody img{max-width:100%;display:block;margin:auto}
+.vbody .doc table{border-collapse:collapse}
+.vbody .doc td,.vbody .doc th{border:1px solid var(--br)}
+.chip{display:inline-block;font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--br);margin:2px 4px 2px 0}
 </style>
-<!-- Document Parser Libraries for PDF and DOCX -->
+<!-- Document Parser Libraries for PDF and DOCX (Tesseract OCR is loaded on demand for scanned files/images) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.2/mammoth.browser.min.js"></script>
 <script>if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';</script>
@@ -82,7 +96,7 @@ const S={
 };
 let me=null,authed=null,loaded={},msg='',mode=null,joinInfo=null;
 let tab='',draft=null,taking=null,trackSec='all',trackStu=null,pend=false;
-let uploadedFileMeta=null;
+let uploadedFileMeta=null,fileBusy=false;
 let joinCode=(new URLSearchParams(location.search).get('join')||'').trim().toLowerCase()||null;
 const LEVELS=['Beginner','Intermediate','Advanced'];
 const secName=id=>(S.sections.find(s=>s.id===id)||{}).name||'-';
@@ -148,89 +162,223 @@ function soft(){
  render();
 }
 document.addEventListener('focusout',()=>{if(pend){pend=false;setTimeout(()=>{if(!taking)render()},300)}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeViewer()});
 
-/* ---------- Content-Analyzed AI Quiz Generator with Difficulty Levels ---------- */
-function isTopicContent(str){
- if(!str || str.trim().length < 4) return false;
- // Strictly filter out school headers, metadata, administrative text, and dates
- const metaPattern = /\b(school|university|college|department|faculty|campus|academy|teacher|instructor|professor|student|name|date|score|grade|class|section|subject|course|module|semester|term|quarter|exam|quiz|test|worksheet|assignment|page|header|footer|copyright|all rights reserved|www\.|http|email)\b/i;
- if(metaPattern.test(str)) return false;
- return true;
+/* =====================================================================
+   CONTENT ANALYSIS + QUIZ GENERATOR
+   Pipeline: clean text -> find headings/sentences -> detect definitions
+   -> weight key concepts -> pick the best "teachable" sentences ->
+   build questions with smart distractors, styled by difficulty level.
+   ===================================================================== */
+const STOP=new Set(('a an the and or but if then else when while of at by for with about against between into through during before after above below to from up down in out on off over under again further once here there all any both each few more most other some such no nor not only own same so than too very can will just should now is are was were be been being have has had do does did this that these those it its they them their he she his her we our you your i me my also may might must shall would could which who whom whose what where why how as because since until although however therefore thus hence per via among within without upon one two three first second third many much called known using used make made often important different various include includes including example examples given based type types like well even still every another around usually generally sometimes ang ng sa na at ay mga ito para ni kay din rin ba po lang ko mo niya sila kami tayo kung kapag dahil pero ngunit pa').split(' '));
+const cap=s=>s?s.charAt(0).toUpperCase()+s.slice(1):s;
+const reEsc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+const shuf=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a};
+const isKey=w=>!STOP.has(w.toLowerCase())&&(w.length>=4||/^\p{Lu}{2,6}$/u.test(w));
+function toks(s){
+ const out=[],re=/\p{L}+(?:[-'’]\p{L}+)*/gu;let m,prev=-1;
+ while((m=re.exec(s))){out.push({w:m[0].replace(/['’]s$/i,''),i:m.index,adj:prev>=0&&/^\s+$/.test(s.slice(prev,m.index))});prev=m.index+m[0].length}
+ return out;
 }
 
-function generate(text, n, types, level){
- const sentences = text.split(/(?<=[.!?])\s+/).map(s=>s.trim()).filter(s=>s.length >= 8);
- const validSentences = sentences.filter(isTopicContent);
- const words = [...new Set(text.match(/[A-Za-z]{4,}/g)||[])].filter(isTopicContent);
- const qs = [];
+/* 1. Remove worksheet headers, page numbers, names/dates, repeated header/footer lines (only whole noise LINES are removed,
+      so educational sentences that merely contain words like "class" or "subject" are kept). */
+const NOISE_LABEL=/^(name|date|score|section|grade|teacher|instructor|professor|school|class|subject|course|student|directions?|instructions?|time allowed|total points?)\s*[:_\-–]/i;
+const NOISE_ORG=/\b(university|college|school|academy|department|faculty|campus|institute)\b/i;
+function isNoiseLine(l){
+ if(/^[\d\W_]+$/.test(l))return true;
+ if(/^(page\s*)?\d+(\s*(of|\/)\s*\d+)?$/i.test(l))return true;
+ if(NOISE_LABEL.test(l))return true;
+ if(/(https?:\/\/|www\.|@\w+\.\w+)/i.test(l))return true;
+ if(/copyright|all rights reserved|©/i.test(l))return true;
+ if(l.length<70&&NOISE_ORG.test(l)&&!/[.!?]$/.test(l))return true;
+ if(/^(mon|tues?|wednes|thurs?|fri|satur|sun)day,?\s/i.test(l)||/^[A-Za-z]+ \d{1,2},? \d{4}$/.test(l))return true;
+ return false;
+}
+function cleanLines(raw){
+ const lines=String(raw||'').replace(/\r/g,'').split('\n').map(l=>l.replace(/\s+/g,' ').trim());
+ const cnt={},key=l=>l.toLowerCase().replace(/\d+/g,'#');
+ lines.forEach(l=>{if(l&&l.length<80)cnt[key(l)]=(cnt[key(l)]||0)+1});
+ return lines.filter(l=>!l||(!(l.length<80&&cnt[key(l)]>=3)&&!isNoiseLine(l)));
+}
+function splitSentences(p){
+ const t=p.replace(/\b(e\.g|i\.e|etc|vs|fig|dr|mr|mrs|ms|prof|no|approx|st)\./gi,m=>m.slice(0,-1)+'\u0001').replace(/(\d)\.(\d)/g,'$1\u0001$2');
+ return t.split(/(?<=[.!?])\s+(?=[\p{Lu}\d"'(])/u).map(s=>s.replace(/\u0001/g,'.').trim()).filter(Boolean);
+}
 
- validSentences.forEach((s, i)=>{
-  if(qs.length >= n) return;
-  const t = types[i % types.length];
-  const sWords = s.match(/[A-Za-z]{5,}/g);
-  if(!sWords) return;
-  
-  const validSWords = sWords.filter(isTopicContent);
-  if(validSWords.length === 0) return;
+/* 2. Definition detection ("X is defined as...", "X refers to...", "X is a ...", "X: ...") */
+const DEFRE=[
+ /^(?:(?:an?|the)\s+)?([\p{L}][\p{L}\- ]{2,45}?)\s+(?:is|are)\s+(?:defined as|called|known as|referred to as|described as)\s+(.{12,})$/iu,
+ /^(?:(?:an?|the)\s+)?([\p{L}][\p{L}\- ]{2,45}?)\s+(?:refers to|means|denotes)\s+(.{12,})$/iu,
+ /^(?:(?:an?|the)\s+)?([\p{L}][\p{L}\- ]{2,45}?)\s+(?:is|are)\s+((?:an?|the|any|one of)\s.{12,})$/iu,
+ /^([\p{L}][\p{L}\- ]{2,40}?)\s*[:–—]\s+(.{15,})$/u
+];
+const BADTERM=/^(it|this|that|these|those|they|he|she|there|we|you|which|what|who|example|note|remember|tip|question|answer|figure|table|step)\b/i;
+function findDef(s){
+ for(const re of DEFRE){
+  const m=s.match(re);if(!m)continue;
+  const term=m[1].trim().replace(/^(?:an?|the)\s+/i,''),def=m[2].trim().replace(/[.!]+$/,'');
+  const ws=term.split(/\s+/);
+  if(ws.length>4||BADTERM.test(term)||!ws.some(isKey)||/[,;()]/.test(term))continue;
+  if(ws.some(w=>STOP.has(w.toLowerCase())&&w.toLowerCase()!=='of'))continue;
+  if(def.split(/\s+/).length<4)continue;
+  return {term,k:term.toLowerCase(),def};
+ }
+ return null;
+}
 
-  const key = validSWords.sort((a,b)=>b.length-a.length)[0];
-
-  if(level === 'Beginner'){
-   // Beginner level: simpler identification or direct true/false
-   if(t === 'tf'){
-    const fake = i % 2 === 1;
-    const other = words.find(x=>x.toLowerCase()!==key.toLowerCase()&&x.length>=4)||'item';
-    qs.push({t:'tf', q: fake ? s.replace(key, other) : s, a: fake ? 'False' : 'True'});
-   } else {
-    qs.push({t:'id', q: `Identify the main term referenced in: "${s.replace(key, '_____')}"`, a: key});
-   }
-  } else if(level === 'Advanced'){
-   // Advanced level: deeper analytical phrasing or complex blanks
-   if(t === 'tf'){
-    const fake = i % 2 === 1;
-    qs.push({t:'tf', q: `Critique statement: "${fake ? s.replace(key, 'anomaly') : s}" - Is this statement fundamentally accurate based on the text?`, a: fake ? 'False' : 'True'});
-   } else if(t === 'mc'){
-    const ch = [key, ...words.filter(x=>x.toLowerCase()!==key.toLowerCase()).sort(()=>Math.random()-.5).slice(0,3)].sort(()=>Math.random()-.5);
-    while(ch.length < 4) ch.push('Advanced Distractor ' + (ch.length+1));
-    qs.push({t:'mc', q: `Advanced Analysis: In the context of the material, evaluate and complete: ${s.replace(key, '_______')}`, ch, a: key});
-   } else {
-    qs.push({t:'id', q: `Advanced Identification: Provide the precise term omitted from: ${s.replace(key, '_______')}`, a: key});
-   }
-  } else {
-   // Intermediate level (Default)
-   if(t==='tf'){
-    const fake = i % 2 === 1;
-    const other = words.find(x=>x.toLowerCase()!==key.toLowerCase()&&x.length>=4)||'concept';
-    qs.push({t:'tf', q: fake ? s.replace(key, other) : s, a: fake ? 'False' : 'True'});
-   } else if(t==='mc'){
-    const ch = [key, ...words.filter(x=>x.toLowerCase()!==key.toLowerCase()).sort(()=>Math.random()-.5).slice(0,3)].sort(()=>Math.random()-.5);
-    while(ch.length < 4) ch.push('Option ' + (ch.length+1));
-    qs.push({t:'mc', q: s.replace(key, '_____'), ch, a: key});
-   } else {
-    qs.push({t:'id', q: s.replace(key, '_____'), a: key});
-   }
+/* 3. Analyze the whole lesson */
+function analyze(raw){
+ const lines=cleanLines(raw),sents=[],headK=new Set();let topic='',buf=[];
+ const flush=()=>{if(buf.length)splitSentences(buf.join(' ')).forEach(s=>sents.push({s,topic}));buf=[]};
+ lines.forEach(l=>{
+  if(!l){flush();return}
+  const bullet=/^([\u2022\u25CF\u25AA*\-–]|\d+[.)])\s+/.test(l),b=l.replace(/^([\u2022\u25CF\u25AA*\-–]|\d+[.)])\s+/,'');
+  const wc=b.split(' ').length;
+  if(bullet&&wc>=4){flush();buf.push(/[.!?]$/.test(b)?b:b+'.');flush();return}
+  if(b.length<70&&!/[.!?:,;]$/.test(b)&&wc<=8&&!/\b(is|are|was|were)\b/i.test(b)){
+   flush();topic=b;toks(b).forEach(t=>isKey(t.w)&&headK.add(t.w.toLowerCase()));return;
   }
+  buf.push(b);
  });
+ flush();
+ const S2=sents.filter(x=>{
+  const w=x.s.split(/\s+/).length;
+  return w>=6&&w<=45&&x.s.length<=300&&!/\?$/.test(x.s)&&!/^(figure|fig\.|table|source|note|example|exercise|question)\b/i.test(x.s);
+ });
+ const freq={},bi={},capMid={},lowMid={},acr={};
+ S2.forEach(({s})=>{
+  const t=toks(s);
+  t.forEach((o,j)=>{
+   if(!isKey(o.w))return;
+   const l=o.w.toLowerCase();freq[l]=(freq[l]||0)+1;
+   if(/^\p{Lu}{2,6}$/u.test(o.w))acr[l]=o.w;
+   if(j>0){if(/^\p{Lu}/u.test(o.w)&&!/^\p{Lu}{2,}$/u.test(o.w))capMid[l]=(capMid[l]||0)+1;else lowMid[l]=(lowMid[l]||0)+1}
+   if(j>0&&o.adj&&isKey(t[j-1].w)){const k=t[j-1].w.toLowerCase()+' '+l;bi[k]=(bi[k]||0)+1}
+  });
+ });
+ const defs=[],seen=new Set();
+ S2.forEach(x=>{x.def=findDef(x.s);if(x.def&&!seen.has(x.def.k)){seen.add(x.def.k);defs.push(x.def)}});
+ const defK=new Set(defs.map(d=>d.k));
+ const terms={};
+ const add=(k,disp,w)=>{terms[k]=terms[k]?{...terms[k],w:Math.max(terms[k].w,w)}:{k,disp,w}};
+ Object.keys(freq).forEach(l=>{
+  const proper=capMid[l]&&!lowMid[l];
+  add(l,acr[l]||(proper?cap(l):l),1+Math.log(freq[l])+(headK.has(l)?1.5:0)+(proper?.5:0)+(l.length>=8?.4:0)+(defK.has(l)?3:0));
+ });
+ Object.keys(bi).filter(k=>bi[k]>=2).forEach(k=>add(k,k,2.5+Math.log(bi[k])+(defK.has(k)?3:0)));
+ defs.forEach(d=>add(d.k,/^\p{Lu}{2,6}$/u.test(d.term)?d.term:d.term.toLowerCase(),5));
+ const termList=Object.values(terms);
+ const cands=S2.map((x,idx)=>{
+  const t=toks(x.s),ks=new Set();
+  t.forEach((o,j)=>{
+   if(!isKey(o.w))return;
+   ks.add(o.w.toLowerCase());
+   if(j>0&&o.adj&&isKey(t[j-1].w))ks.add(t[j-1].w.toLowerCase()+' '+o.w.toLowerCase());
+  });
+  if(x.def)ks.add(x.def.k);
+  const hits=[...ks].map(k=>terms[k]).filter(Boolean).sort((a,b)=>b.w-a.w);
+  let sc=hits.slice(0,3).reduce((a,h)=>a+h.w,0)+(x.def?4:0)+(/\d/.test(x.s)?.5:0)+(x.s.length>=60&&x.s.length<=200?1:0);
+  /* sentences that depend on earlier context ("This is...", "However...") make bad standalone questions */
+  if(!x.def&&/^(this|that|these|those|it|its|they|he|she|there|such|however|therefore|thus|also|but|and|so|then|their)\b/i.test(x.s))sc-=100;
+  return {...x,idx,terms:hits,score:sc};
+ }).filter(c=>c.terms.length&&c.score>0);
+ const concepts=[...termList].sort((a,b)=>b.w-a.w).slice(0,8).map(t=>t.disp);
+ return {cands,termList,defs,byK:terms,concepts};
+}
 
- const fallbackPool = words.length >= 3 ? words : ['Concept', 'Principle', 'Analysis', 'Theory', 'Process', 'System'];
- while(qs.length < n){
-  const idx = qs.length;
-  const w = fallbackPool[idx % fallbackPool.length];
-  const t = types[idx % types.length];
-  if(t==='tf'){
-   qs.push({t:'tf', q:`Is ${w} considered a primary focus of the lesson text?`, a:'True'});
-  } else if(t==='mc'){
-   const ch = [w, ...fallbackPool.filter(x=>x!==w).slice(0,3)].sort(()=>Math.random()-.5);
-   while(ch.length < 4) ch.push('None of the above');
-   qs.push({t:'mc', q:`Select the correct concept for item #${idx+1} (${level} level):`, ch, a:w});
-  } else {
-   qs.push({t:'id', q:`Identify the term for item #${idx+1}:`, a:w});
+/* 4. Distractors: same "shape" as the answer (single word / phrase / acronym, similar length), topical, never already in the sentence */
+function distractors(T,sent,A,need){
+ const tl=T.k,low=sent.toLowerCase(),multi=tl.includes(' '),acr=/^\p{Lu}{2,6}$/u.test(T.disp);
+ const pool=A.termList.filter(x=>x.k!==tl&&!low.includes(x.k)&&x.k.slice(0,5)!==tl.slice(0,5)&&!tl.includes(x.k)&&!x.k.includes(tl));
+ const score=x=>(x.k.includes(' ')===multi?2:0)+(/^\p{Lu}{2,6}$/u.test(x.disp)===acr?1:0)-Math.abs(x.k.length-tl.length)/6+Math.min(x.w,4)/2+Math.random();
+ return pool.sort((a,b)=>score(b)-score(a)).slice(0,need).map(x=>x.disp);
+}
+const sub=(s,t,r)=>{const o=s.replace(new RegExp('(^|[^\\p{L}])'+reEsc(t)+'(?:s|es)?(?![\\p{L}])','giu'),(m,p)=>p+r);return o!==s?o:null};
+const blank=(s,t)=>sub(s,t,'_____');
+const fmtDef=d=>cap(d.replace(/[.!]+$/,''));
+
+/* 5. Build one question of a given type from an analyzed sentence */
+function mk(c,type,lvl,A,st){
+ const s=c.s,D=c.def,beg=lvl==='Beginner',adv=lvl==='Advanced';
+ let T=c.terms[0];
+ if(D)T=A.byK[D.k]||T;
+ if(!T)return null;
+ const hint=beg?` (Hint: ${T.disp.length} letters, starts with “${cap(T.disp[0])}”)`:'';
+
+ if(type==='tf'){
+  const wantFalse=st.tf%2===1;
+  let stmt=s,ans='True';
+  if(wantFalse){
+   const neg=()=>{
+    if(/\b(not|no|never|cannot)\b|n't/i.test(s))return null;
+    const r=s.replace(/\b(is|are|was|were|can|does|do|will|has|have)\b/i,m=>m.toLowerCase()==='can'?(m[0]==='C'?'Cannot':'cannot'):m+' not');
+    return r!==s?r:null;
+   };
+   const num=()=>{
+    const m=s.match(/\b\d+(?:\.\d+)?\b/);if(!m)return null;
+    const v=parseFloat(m[0]);let nv;
+    if(Number.isInteger(v)&&v>=1000&&v<=2100)nv=v+(Math.random()<.5?-1:1)*(3+Math.floor(Math.random()*20));
+    else if(v>=10)nv=Math.round(v*(Math.random()<.5?.5:2));
+    else nv=v+1+Math.floor(Math.random()*3);
+    return nv===v?null:s.replace(m[0],String(nv));
+   };
+   const swap=()=>{const d=distractors(T,s,A,1)[0];return d?sub(s,T.k,d):null};
+   const order=beg?[neg,swap,num]:adv?[num,swap,neg]:[swap,neg,num];
+   for(const fn of order){const r=fn();if(r){stmt=r;ans='False';break}}
   }
+  st.tf++;
+  return {t:'tf',q:(adv?'Based on the lesson, decide whether this statement is accurate: ':'True or False: ')+cap(stmt),a:ans,src:s};
  }
 
- return qs.slice(0, n);
+ if(type==='mc'){
+  if(D){
+   const od=A.defs.filter(x=>x.k!==D.k&&!x.def.toLowerCase().includes(T.k))
+    .sort((a,b)=>Math.abs(a.def.length-D.def.length)-Math.abs(b.def.length-D.def.length)).slice(0,6);
+   if(!beg&&od.length>=3&&st.mc++%2===0){
+    const right=fmtDef(D.def),ds=shuf(od).slice(0,3).map(x=>fmtDef(x.def));
+    return {t:'mc',q:`According to the lesson, which of the following best describes ${T.disp}?`,ch:shuf([right,...ds]),a:right,src:s};
+   }
+   const ds=distractors(T,s,A,3);if(ds.length<3)return null;
+   const dq=blank(D.def,T.disp)||D.def;
+   return {t:'mc',q:`Which term matches this description: “${dq}”?`,ch:shuf([cap(T.disp),...ds.map(cap)]),a:cap(T.disp),src:s};
+  }
+  const b=blank(s,T.disp);if(!b)return null;
+  const ds=distractors(T,s,A,3);if(ds.length<3)return null;
+  const lead=beg?'Fill in the blank: ':adv?'Based on the lesson, choose the term that correctly completes the statement: ':'Choose the term that best completes the sentence: ';
+  return {t:'mc',q:lead+b,ch:shuf([cap(T.disp),...ds.map(cap)]),a:cap(T.disp),src:s};
+ }
+
+ /* identification */
+ if(D){const dq=blank(D.def,T.disp)||D.def;return {t:'id',q:`What term is described here: “${dq}”?${hint}`,a:T.disp,src:s}}
+ const b=blank(s,T.disp);if(!b)return null;
+ return {t:'id',q:(adv?'Provide the missing term: ':'Fill in the blank: ')+b+hint,a:T.disp,src:s};
 }
-function grade(act,ans){let sc=0;act.qs.forEach((q,i)=>{if(String(ans[i]||'').trim().toLowerCase()===String(q.a).toLowerCase())sc++});return sc}
+
+function generate(text,n,types,level){
+ const lvl=LEVELS.includes(level)?level:'Intermediate',A=analyze(text);
+ const rank=c=>c.score+(lvl==='Beginner'?(c.def?2:0)+(c.s.length<150?1.5:-1.5)
+  :lvl==='Advanced'?(c.terms.length>=2?1.5:0)+(c.s.length>=90?1.5:-1.5)+(c.def?-1:0):0);
+ const ranked=[...A.cands].sort((a,b)=>rank(b)-rank(a));
+ const st={tf:Math.floor(Math.random()*2),mc:0},out=[];
+ for(const c of ranked){
+  if(out.length>=n)break;
+  for(let k=0;k<types.length;k++){
+   const q=mk(c,types[(out.length+k)%types.length],lvl,A,st);
+   if(q){out.push({q,idx:c.idx});break}
+  }
+ }
+ out.sort((a,b)=>a.idx-b.idx);
+ const qs=out.map(o=>o.q);
+ let note='';
+ if(!qs.length)note='Could not find enough complete, topic-related sentences. Make sure the lesson text has full sentences (not just headings or a worksheet header).';
+ else if(qs.length<n)note=`Only ${qs.length} good question(s) could be built from this lesson (you asked for ${n}). Add more lesson text with complete sentences for more.`;
+ return {qs,note,concepts:A.concepts};
+}
+
+/* answers are compared ignoring case, punctuation, a leading "a/an/the" and a trailing plural "s" */
+const norm=s=>{let t=String(s??'').toLowerCase().replace(/[“”"'’.,;:!?()]/g,'').replace(/^(a|an|the)\s+/,'').replace(/\s+/g,' ').trim();return t.length>3?t.replace(/s$/,''):t};
+function grade(act,ans){let sc=0;act.qs.forEach((q,i)=>{if(norm(ans[i])===norm(q.a))sc++});return sc}
 
 function scoped(){
  const ids=S.hosted.map(s=>s.id);
@@ -238,6 +386,49 @@ function scoped(){
   materials:S.materials.filter(m=>ids.includes(m.section)),activities:S.activities.filter(a=>ids.includes(a.section)),
   subs:S.subs.filter(x=>ids.includes(x.section))};
 }
+
+/* ---------- File viewer (opens attachments directly on the page) ---------- */
+function fileKind(f){
+ const e=((f.name||'').split('.').pop()||'').toLowerCase();
+ if(e==='pdf')return 'pdf';
+ if(e==='docx')return 'docx';
+ if(['png','jpg','jpeg','gif','webp','bmp','svg'].includes(e)||(f.type||'').startsWith('image/'))return 'img';
+ if(['txt','md','csv','html','htm','json'].includes(e)||(f.type||'').startsWith('text/'))return 'txt';
+ return 'other';
+}
+function dataUrlToBlob(u){
+ const i=u.indexOf(','),h=u.slice(0,i),mime=(h.match(/:(.*?)(;|$)/)||[])[1]||'application/octet-stream';
+ const bin=atob(u.slice(i+1)),a=new Uint8Array(bin.length);
+ for(let j=0;j<bin.length;j++)a[j]=bin.charCodeAt(j);
+ return new Blob([a],{type:mime});
+}
+function cleanHtml(h){
+ const d=new DOMParser().parseFromString(h,'text/html');
+ d.querySelectorAll('script,style,iframe,object,embed,link,meta,form').forEach(n=>n.remove());
+ d.querySelectorAll('*').forEach(n=>[...n.attributes].forEach(a=>{if(/^on/i.test(a.name)||/^\s*javascript:/i.test(a.value))n.removeAttribute(a.name)}));
+ return d.body.innerHTML;
+}
+function closeViewer(){const v=document.getElementById('viewer');if(v){if(v._url)URL.revokeObjectURL(v._url);v.remove()}}
+async function viewFile(id){
+ const m=S.materials.find(x=>x.id===id);
+ if(!m||!m.fileMeta||!m.fileMeta.dataUrl){alert('This file was too large to attach. Only its text was saved.');return}
+ closeViewer();
+ const f=m.fileMeta,k=fileKind(f),blob=dataUrlToBlob(f.dataUrl),url=URL.createObjectURL(blob);
+ const ov=document.createElement('div');ov.id='viewer';ov._url=url;
+ ov.onclick=e=>{if(e.target===ov)closeViewer()};
+ ov.innerHTML=`<div class="vbox"><div class="vbar"><b>${esc(f.name)}</b><span><a class="btn s" href="${url}" download="${esc(f.name)}">Download</a><button class="btn s" onclick="closeViewer()">Close</button></span></div><div class="vbody" id="vbody">Loading...</div></div>`;
+ document.body.appendChild(ov);
+ const vb=document.getElementById('vbody');
+ try{
+  if(k==='pdf')vb.innerHTML=`<iframe src="${url}" title="${esc(f.name)}"></iframe>`;
+  else if(k==='img')vb.innerHTML=`<img src="${url}" alt="${esc(f.name)}">`;
+  else if(k==='docx'){const r=await mammoth.convertToHtml({arrayBuffer:await blob.arrayBuffer()});vb.innerHTML='<div class="doc">'+cleanHtml(r.value)+'</div>'}
+  else if(k==='txt'){const pre=document.createElement('pre');pre.textContent=await blob.text();vb.innerHTML='';vb.appendChild(pre)}
+  else vb.innerHTML='<div class="doc">This file type cannot be previewed here. Use the Download button.</div>';
+ }catch(e){console.error(e);vb.innerHTML='<div class="doc">Could not preview this file. Use the Download button.</div>'}
+}
+const fileBar=m=>m.fileMeta?`<div class="file-attach">📎 <b>${esc(m.fileMeta.name)}</b> (${Math.round((m.fileMeta.size||0)/1024)} KB)
+ ${m.fileMeta.dataUrl?`<button class="btn s" style="margin:0 0 0 8px;padding:4px 10px" onclick="viewFile('${m.id}')">Open</button>`:'<span class="mu"> &middot; file too large to attach, text only</span>'}</div>`:'';
 
 /* ---------- Views ---------- */
 function render(){
@@ -417,12 +608,13 @@ function Materials(){
  <div class="row"><div><label>Level</label><select id="ml">${LEVELS.map(l=>`<option>${l}</option>`).join('')}</select></div>
  <div><label>Section</label><select id="ms">${S.sections.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div></div>
  <label>Lesson file (PDF, DOCX, TXT, Images, etc.)</label>
- <input type="file" id="mf" onchange="readFile(this)">
- <textarea id="mx" placeholder="Paste or type lesson content here"></textarea>
+ <input type="file" id="mf" accept=".pdf,.docx,.txt,.md,.csv,.html,.htm,image/*" onchange="readFile(this)">
+ <div class="mu" id="fstat" style="margin-top:4px"></div>
+ <textarea id="mx" placeholder="Paste or type lesson content here (text from an uploaded file appears here so you can check it)"></textarea>
  <button class="btn" onclick="addMat()">Save lesson</button></div>
  <div class="card"><h2>Lessons</h2>${S.materials.map(m=>`<div class="q"><span class="tag">${m.level}</span><b>${esc(m.title)}</b>
  <span class="mu"> &middot; ${esc(secName(m.section))}</span>
- ${m.fileMeta ? `<div class="file-attach">📎 <b>Attachment:</b> <a href="${m.fileMeta.dataUrl}" download="${esc(m.fileMeta.name)}" target="_blank">${esc(m.fileMeta.name)}</a> (${Math.round(m.fileMeta.size/1024)} KB)</div>` : ''}
+ ${fileBar(m)}
  <button class="btn d" style="float:right;margin:0" onclick="delMat('${m.id}')">Delete</button></div>`).join('')||'<p class="mu">None yet.</p>'}</div>`;
 }
 function CreateQuiz(){
@@ -430,10 +622,13 @@ function CreateQuiz(){
  let h=`<div class="card"><h2>Generate quiz from a lesson</h2>
  <label>Lesson</label><select id="gm">${S.materials.map(m=>`<option value="${m.id}">${esc(m.title)}</option>`).join('')}</select>
  <div class="row"><div><label>Number of questions</label><input id="gn" type="number" value="5" min="1" max="20"></div>
- <div><label>Types</label><select id="gt"><option value="mix">Mixed</option><option value="mc">Multiple choice</option><option value="tf">True / False</option><option value="id">Identification</option></select></div></div>
+ <div><label>Types</label><select id="gt"><option value="mix">Mixed</option><option value="mc">Multiple choice</option><option value="tf">True / False</option><option value="id">Identification</option></select></div>
+ <div><label>Difficulty</label><select id="gl"><option value="">Same as lesson level</option>${LEVELS.map(l=>`<option>${l}</option>`).join('')}</select></div></div>
  <button class="btn" onclick="gen()">Generate</button></div>`;
  if(draft){
   h+=`<div class="card"><h2>Preview &amp; edit</h2>
+  ${draft.concepts&&draft.concepts.length?`<div class="mu">Key concepts detected: ${draft.concepts.map(c=>`<span class="chip">${esc(c)}</span>`).join('')}</div>`:''}
+  ${draft.note?`<div class="mu bad" style="margin:6px 0">${esc(draft.note)}</div>`:''}
   <label>Activity title</label><input id="at" value="${esc(draft.title)}">
   <div class="row"><div><label>Level</label><select id="al">${LEVELS.map(l=>`<option ${l===draft.level?'selected':''}>${l}</option>`).join('')}</select></div>
   <div><label>Publish to section</label><select id="as">${S.sections.map(s=>`<option value="${s.id}" ${s.id===draft.section?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div>
@@ -442,6 +637,7 @@ function CreateQuiz(){
   <label>Question</label><textarea style="min-height:50px" onchange="draft.qs[${i}].q=this.value">${esc(q.q)}</textarea>
   ${q.ch?`<label>Choices (one per line)</label><textarea style="min-height:70px" onchange="draft.qs[${i}].ch=this.value.split('\\n')">${esc(q.ch.join('\n'))}</textarea>`:''}
   <label>Answer key</label><input value="${esc(q.a)}" onchange="draft.qs[${i}].a=this.value">
+  ${q.src?`<div class="mu" style="margin-top:6px">Source sentence: ${esc(q.src)}</div>`:''}
   <button class="btn s" onclick="draft.qs.splice(${i},1);render()">Delete question</button></div>`).join('')}
   <button class="btn" onclick="publish()">Save &amp; publish</button></div>`;
  }
@@ -463,8 +659,9 @@ function Results(){
 function Lessons(){
  const ids=S.mine.map(m=>m.section),mine=S.materials.filter(m=>ids.includes(m.section));
  return LEVELS.map(l=>{const ms=mine.filter(m=>m.level===l);
-  return ms.length?`<div class="card"><h2>${l}</h2>${ms.map(m=>`<div class="q"><b>${esc(m.title)}</b> <span class="mu">&middot; ${esc(secName(m.section))}</span><p style="white-space:pre-wrap">${esc(m.text||'')}</p>
-  ${m.fileMeta ? `<div class="file-attach">📎 <b>Attachment:</b> <a href="${m.fileMeta.dataUrl}" download="${esc(m.fileMeta.name)}" target="_blank">${esc(m.fileMeta.name)}</a></div>` : ''}
+  return ms.length?`<div class="card"><h2>${l}</h2>${ms.map(m=>`<div class="q"><b>${esc(m.title)}</b> <span class="mu">&middot; ${esc(secName(m.section))}</span>
+  ${fileBar(m)}
+  ${m.fileMeta&&m.text?`<details style="margin-top:8px"><summary class="mu" style="cursor:pointer">Show lesson text</summary><p style="white-space:pre-wrap">${esc(m.text)}</p></details>`:`<p style="white-space:pre-wrap">${esc(m.text||'')}</p>`}
   </div>`).join('')}</div>`:''}).join('')||'<div class="card">No lessons in your classes yet.</div>';
 }
 function StudentActs(){
@@ -560,65 +757,97 @@ function leaveClass(mid){
  col('members').doc(mid).delete().catch(fail);
 }
 
-function readFile(inp){
+/* ---------- File reading: extracts text for the quiz generator AND keeps the file so it can be opened on the page ---------- */
+const MAX_ATTACH=600*1024; /* Firestore documents are limited to ~1 MiB; base64 adds ~33% */
+const setStat=t=>{const e=document.getElementById('fstat');if(e)e.textContent=t};
+const readAs=(f,m)=>new Promise((ok,no)=>{const r=new FileReader();r.onload=()=>ok(r.result);r.onerror=()=>no(r.error);r[m](f)});
+const loadScript=src=>new Promise((ok,no)=>{const s=document.createElement('script');s.src=src;s.onload=ok;s.onerror=no;document.head.appendChild(s)});
+async function ocr(src){
+ if(!window.Tesseract)await loadScript('https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js');
+ return (await Tesseract.recognize(src,'eng')).data.text;
+}
+async function pdfToText(buf){
+ const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise,out=[];
+ for(let p=1;p<=pdf.numPages;p++){
+  const tc=await (await pdf.getPage(p)).getTextContent();
+  let line='',y=null;
+  tc.items.forEach(it=>{
+   const yy=Math.round(it.transform[5]);
+   if(y!==null&&Math.abs(yy-y)>2){out.push(line.trim());line=''}
+   line+=it.str+' ';y=yy;
+  });
+  out.push(line.trim());out.push('');
+ }
+ return out.join('\n');
+}
+async function pdfOcr(buf){
+ const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf.slice(0))}).promise,out=[];
+ for(let p=1;p<=Math.min(pdf.numPages,8);p++){
+  setStat('Running OCR on page '+p+'...');
+  const pg=await pdf.getPage(p),vp=pg.getViewport({scale:2}),cv=document.createElement('canvas');
+  cv.width=vp.width;cv.height=vp.height;
+  await pg.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
+  out.push(await ocr(cv));
+ }
+ return out.join('\n\n');
+}
+function htmlToText(h){
+ const d=new DOMParser().parseFromString(h,'text/html');
+ d.querySelectorAll('script,style,nav,header,footer').forEach(n=>n.remove());
+ return d.body.textContent||'';
+}
+async function readFile(inp){
  const f=inp.files[0];
  if(!f)return;
- if(!val('mt')) document.getElementById('mt').value = f.name.replace(/\.[^.]+$/, '');
-
- const r=new FileReader();
- 
- if(f.name.endsWith('.pdf')){
-  r.onload=function(){
-   const typedarray = new Uint8Array(r.result);
-   pdfjsLib.getDocument(typedarray).promise.then(function(pdf){
-    let maxPages = pdf.numPages, countPromises = [];
-    for(let j=1; j<=maxPages; j++){
-     countPromises.push(pdf.getPage(j).then(p => p.getTextContent().then(tc => tc.items.map(i=>i.str).join(' '))));
-    }
-    return Promise.all(countPromises);
-   }).then(function(texts){
-    document.getElementById('mx').value = texts.join('\n');
-   }).catch(function(err){ console.error(err); });
-  };
-  r.readAsArrayBuffer(f);
-  uploadedFileMeta = { name: f.name, size: f.size, type: f.type };
-  return;
- }
- 
- if(f.name.endsWith('.docx')){
-  r.onload=function(){
-   mammoth.extractRawText({arrayBuffer: r.result}).then(function(result){
-    document.getElementById('mx').value = result.value;
-   }).catch(function(err){ console.error(err); });
-  };
-  r.readAsArrayBuffer(f);
-  uploadedFileMeta = { name: f.name, size: f.size, type: f.type };
-  return;
- }
-
- r.onload=()=>{
-  if (typeof r.result === 'string' && (f.type.startsWith('text/') || f.name.endsWith('.txt') || f.name.endsWith('.md') || f.name.endsWith('.csv') || f.name.endsWith('.html'))) {
-   document.getElementById('mx').value = r.result;
-   uploadedFileMeta = null;
-  } else {
-   uploadedFileMeta = { name: f.name, size: f.size, type: f.type, dataUrl: r.result };
+ const ext=(f.name.split('.').pop()||'').toLowerCase();
+ if(!val('mt'))document.getElementById('mt').value=f.name.replace(/\.[^.]+$/,'');
+ const meta={name:f.name,size:f.size,type:f.type||''};
+ let text='',notes=[];
+ uploadedFileMeta=null;fileBusy=true;
+ try{
+  setStat('Reading file...');
+  if(ext==='pdf'){
+   const buf=await readAs(f,'readAsArrayBuffer');
+   text=await pdfToText(buf);
+   if(text.replace(/\s/g,'').length<40){setStat('No text layer found, running OCR (first 8 pages)...');text=await pdfOcr(buf)}
+  }else if(ext==='docx'){
+   text=(await mammoth.extractRawText({arrayBuffer:await readAs(f,'readAsArrayBuffer')})).value;
+  }else if(['txt','md','csv','html','htm','json'].includes(ext)||(f.type||'').startsWith('text/')){
+   text=await readAs(f,'readAsText');
+   if(ext==='html'||ext==='htm')text=htmlToText(text);
+  }else if((f.type||'').startsWith('image/')){
+   setStat('Reading text from the image (OCR)...');
+   text=await ocr(f);
   }
- };
- 
- if (f.type.startsWith('text/') || f.name.endsWith('.txt') || f.name.endsWith('.md') || f.name.endsWith('.csv') || f.name.endsWith('.html')) {
-  r.readAsText(f);
- } else {
-  r.readAsDataURL(f);
+  if(f.size<=MAX_ATTACH)meta.dataUrl=await readAs(f,'readAsDataURL');
+  else notes.push('File is over '+Math.round(MAX_ATTACH/1024)+' KB, so only its text will be saved (it cannot be opened later).');
+ }catch(e){
+  console.error(e);
+  notes.push('Could not fully read this file: '+(e.message||e));
  }
+ text=text.trim();
+ if(text){const mx=document.getElementById('mx');if(mx)mx.value=text}
+ else notes.push('No readable text found. Paste the lesson text below so quizzes can be generated.');
+ setStat((text?'Ready: extracted '+text.length+' characters. ':'')+notes.join(' '));
+ uploadedFileMeta=meta;fileBusy=false;
 }
 
 function addMat(){
+ if(fileBusy){alert('Still reading the file, please wait a moment.');return}
  const t=val('mt').trim(),x=val('mx').trim();
  if(!t || (!x && !uploadedFileMeta)){alert('Add a title and either lesson text or a file.');return}
  if(!val('ms')){alert('Create a section first.');return}
  
  const payload = { title: t, level: val('ml'), section: val('ms'), text: x };
- if (uploadedFileMeta) payload.fileMeta = uploadedFileMeta;
+ if (uploadedFileMeta) {
+  const meta={...uploadedFileMeta};
+  /* keep the whole document safely under Firestore's 1 MiB limit */
+  if(new Blob([x]).size+(meta.dataUrl?meta.dataUrl.length:0)>900000){
+   delete meta.dataUrl;
+   alert('The file plus its text is too large to attach, so only the text was saved.');
+  }
+  payload.fileMeta = meta;
+ }
  
  col('materials').add(payload).then(()=>{
   uploadedFileMeta = null;
@@ -630,19 +859,17 @@ function delMat(id){col('materials').doc(id).delete().catch(fail)}
 function gen(){
  const m=S.materials.find(x=>x.id===val('gm'));if(!m){alert('Upload a lesson first.');return}
  const t=val('gt'),types=t==='mix'?['mc','tf','id']:[t];
- let sourceText = (m.text && m.text.trim().length > 0) ? m.text : '';
- if(!sourceText && m.fileMeta && m.fileMeta.dataUrl && m.fileMeta.dataUrl.startsWith('data:text/')) {
-  try { sourceText = atob(m.fileMeta.dataUrl.split(',')[1]); } catch(e){}
- }
- if(!sourceText) sourceText = m.title;
- 
- const qs=generate(sourceText, +val('gn')||5, types, m.level);
- draft={title:m.title+' Quiz',level:m.level,section:m.section,qs};render();
+ const sourceText=(m.text||'').trim();
+ if(!sourceText){alert('This lesson has no readable text. Paste the lesson text into a new lesson, or upload a PDF, DOCX, TXT or image that contains text.');return}
+ const lvl=val('gl')||m.level;
+ const r=generate(sourceText, +val('gn')||5, types, lvl);
+ if(!r.qs.length){alert(r.note);return}
+ draft={title:m.title+' Quiz',level:lvl,section:m.section,qs:r.qs,note:r.note,concepts:r.concepts};render();
 }
 function publish(){
  draft.title=val('at');draft.level=val('al');draft.section=val('as');draft.due=val('ad');
  const d=draft;draft=null;tab='Activities';
- col('activities').add({title:d.title,level:d.level,section:d.section,due:d.due,qs:d.qs}).catch(fail);render();
+ col('activities').add({title:d.title,level:d.level,section:d.section,due:d.due,qs:d.qs.map(({src,...q})=>q)}).catch(fail);render();
 }
 async function delAct(id){
  const a=S.activities.find(x=>x.id===id);if(!a||!confirm('Delete this activity and its submissions?'))return;
