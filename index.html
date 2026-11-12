@@ -1268,17 +1268,31 @@ function solveWord(raw){
 
 </script>
  <script>
-/* LearnITAll add-on: level locking (Intermediate needs all Beginner activities, Advanced needs all Beginner + Intermediate) */
+/* LearnITAll add-on: level locking with 75% pass mark + activities under each lesson */
+const PASS=0.75;
+const passed=s=>!!s&&s.total>0&&s.score/s.total>=PASS;
+const mySub=a=>S.subs.find(s=>s.act===a.id&&s.student===me.id);
 
-/* a level is done when the student submitted every activity of that level in that class */
+/* a level is done when every activity of that level in that class is submitted AND passed (>= 75%) */
 function levelDone(sec,lvl){
- return S.activities.filter(a=>a.section===sec&&a.level===lvl)
-  .every(a=>S.subs.some(s=>s.act===a.id&&s.student===me.id));
+ return S.activities.filter(a=>a.section===sec&&a.level===lvl).every(a=>passed(mySub(a)));
 }
-/* returns the first unfinished earlier level, or null if the level is open */
 function lockedBy(sec,lvl){
  for(let j=0;j<LEVELS.indexOf(lvl);j++)if(!levelDone(sec,LEVELS[j]))return LEVELS[j];
  return null;
+}
+
+/* one activity card (used under each lesson and in the Activities tab) */
+function actCard(a){
+ const sub=mySub(a),late=a.due&&new Date(a.due)<new Date(),lk=lockedBy(a.section,a.level);
+ let st;
+ if(lk)st=`<div class="mu">🔒 Locked. Pass all ${lk} activities (75%+) first.</div>`;
+ else if(sub&&passed(sub))st=`<div class="ok">Passed: ${sub.score}/${sub.total} (${Math.round(sub.score/sub.total*100)}%)</div>`;
+ else if(sub)st=`<div class="bad">Not passed: ${sub.score}/${sub.total} (${Math.round(sub.score/sub.total*100)}%). You need 75% to continue.</div><button class="btn" onclick="startAct('${a.id}')">Retake activity</button>`;
+ else if(late)st='<div class="bad">Deadline passed</div>';
+ else st=`<button class="btn" onclick="startAct('${a.id}')">Take activity</button>`;
+ return `<div class="q"><span class="tag">${a.level}</span><b>${esc(a.title)}</b>
+ <div class="mu">${esc(secName(a.section))} &middot; ${a.qs.length} questions &middot; due ${a.due?new Date(a.due).toLocaleString():'no deadline'}</div>${st}</div>`;
 }
 
 function Lessons(){
@@ -1287,29 +1301,52 @@ function Lessons(){
   return ms.length?`<div class="card"><h2>${l}</h2>${ms.map(m=>{
   const lk=lockedBy(m.section,l);
   if(lk)return `<div class="q" style="opacity:.7">🔒 <b>${esc(m.title)}</b> <span class="mu">&middot; ${esc(secName(m.section))}</span>
-   <div class="mu">Locked. Complete all ${lk} activities in this class to unlock.</div></div>`;
+   <div class="mu">Locked. Pass all ${lk} activities (75%+) in this class to unlock.</div></div>`;
+  /* activities linked to this lesson; older activities with no link show under the lessons of the same class and level */
+  const acts=S.activities.filter(a=>a.section===m.section&&a.level===m.level&&(a.mat?a.mat===m.id:true));
   return `<div class="q"><b>${esc(m.title)}</b> <span class="mu">&middot; ${esc(secName(m.section))}</span>
   ${fileBar(m)}
   ${m.fileMeta&&m.text?`<details style="margin-top:8px"><summary class="mu" style="cursor:pointer">Show lesson text</summary><p style="white-space:pre-wrap">${esc(m.text)}</p></details>`:`<p style="white-space:pre-wrap">${esc(m.text||'')}</p>`}
+  <h3 style="margin-top:14px">Activities for this lesson</h3>
+  ${acts.map(actCard).join('')||'<p class="mu">No activities for this lesson yet.</p>'}
   </div>`}).join('')}</div>`:''}).join('')||'<div class="card">No lessons in your classes yet.</div>';
 }
 
 function StudentActs(){
  const ids=S.mine.map(m=>m.section),mine=S.activities.filter(a=>ids.includes(a.section));
- return `<div class="card"><h2>Activities</h2>${mine.map(a=>{
-  const sub=S.subs.find(s=>s.act===a.id&&s.student===me.id),late=a.due&&new Date(a.due)<new Date(),lk=lockedBy(a.section,a.level);
-  return `<div class="q"><span class="tag">${a.level}</span><b>${esc(a.title)}</b>
-  <div class="mu">${esc(secName(a.section))} &middot; ${a.qs.length} questions &middot; due ${a.due?new Date(a.due).toLocaleString():'no deadline'}</div>
-  ${sub?`<div class="ok">Submitted: ${sub.score}/${sub.total}</div>`
-   :lk?`<div class="mu">🔒 Locked. Complete all ${lk} activities in this class first.</div>`
-   :late?'<div class="bad">Deadline passed</div>':`<button class="btn" onclick="startAct('${a.id}')">Take activity</button>`}</div>`}).join('')||'<p class="mu">Nothing published to your classes yet.</p>'}</div>`;
+ return `<div class="card"><h2>Activities</h2>${mine.map(actCard).join('')||'<p class="mu">Nothing published to your classes yet.</p>'}</div>`;
 }
 
 function startAct(id){
  const a=S.activities.find(x=>x.id===id);
- if(!a||lockedBy(a.section,a.level)){msg='Finish the previous level first.';render();return}
+ if(!a||lockedBy(a.section,a.level)){msg='Finish the previous level first (75% or higher on every activity).';render();return}
+ const sub=mySub(a);
+ if(passed(sub)){msg='You already passed this activity.';render();return}
+ if(!sub&&a.due&&new Date(a.due)<new Date()){msg='The deadline for this activity has passed.';render();return}
  taking=id;render();
 }
+
+/* submit: a failed attempt can be retaken (the new score replaces the old one); a passed one cannot */
+function submitAct(){
+ const a=S.activities.find(x=>x.id===taking);
+ if(passed(mySub(a))){taking=null;render();return}
+ const ans=a.qs.map((q,i)=>{
+  if(q.t==='id')return document.querySelector(`[name=q${i}]`).value;
+  const c=document.querySelector(`[name=q${i}]:checked`);return c?c.value:'';});
+ const score=grade(a,ans);
+ col('subs').doc(a.id+'_'+me.id).set({act:a.id,section:a.section,student:me.id,answers:ans,score,total:a.qs.length,at:Date.now()}).catch(fail);
+ taking=null;tab='My Scores';render();
+}
+
+/* link each new quiz to the lesson it was generated from */
+const _gen=window.gen;
+window.gen=function(){const id=val('gm');_gen();if(draft)draft.mat=id};
+function publish(){
+ draft.title=val('at');draft.level=val('al');draft.section=val('as');draft.due=val('ad');
+ const d=draft;draft=null;tab='Activities';
+ col('activities').add({title:d.title,level:d.level,section:d.section,due:d.due,mat:d.mat||null,qs:d.qs.map(({src,...q})=>q)}).catch(fail);render();
+}
+</script>
 </script>
 </body>
 </html>
