@@ -1267,5 +1267,49 @@ function solveWord(raw){
 }
 
 </script>
+ <script>
+/* LearnITAll add-on: level locking (Intermediate needs all Beginner activities, Advanced needs all Beginner + Intermediate) */
+
+/* a level is done when the student submitted every activity of that level in that class */
+function levelDone(sec,lvl){
+ return S.activities.filter(a=>a.section===sec&&a.level===lvl)
+  .every(a=>S.subs.some(s=>s.act===a.id&&s.student===me.id));
+}
+/* returns the first unfinished earlier level, or null if the level is open */
+function lockedBy(sec,lvl){
+ for(let j=0;j<LEVELS.indexOf(lvl);j++)if(!levelDone(sec,LEVELS[j]))return LEVELS[j];
+ return null;
+}
+
+function Lessons(){
+ const ids=S.mine.map(m=>m.section),mine=S.materials.filter(m=>ids.includes(m.section));
+ return LEVELS.map(l=>{const ms=mine.filter(m=>m.level===l);
+  return ms.length?`<div class="card"><h2>${l}</h2>${ms.map(m=>{
+  const lk=lockedBy(m.section,l);
+  if(lk)return `<div class="q" style="opacity:.7">🔒 <b>${esc(m.title)}</b> <span class="mu">&middot; ${esc(secName(m.section))}</span>
+   <div class="mu">Locked. Complete all ${lk} activities in this class to unlock.</div></div>`;
+  return `<div class="q"><b>${esc(m.title)}</b> <span class="mu">&middot; ${esc(secName(m.section))}</span>
+  ${fileBar(m)}
+  ${m.fileMeta&&m.text?`<details style="margin-top:8px"><summary class="mu" style="cursor:pointer">Show lesson text</summary><p style="white-space:pre-wrap">${esc(m.text)}</p></details>`:`<p style="white-space:pre-wrap">${esc(m.text||'')}</p>`}
+  </div>`}).join('')}</div>`:''}).join('')||'<div class="card">No lessons in your classes yet.</div>';
+}
+
+function StudentActs(){
+ const ids=S.mine.map(m=>m.section),mine=S.activities.filter(a=>ids.includes(a.section));
+ return `<div class="card"><h2>Activities</h2>${mine.map(a=>{
+  const sub=S.subs.find(s=>s.act===a.id&&s.student===me.id),late=a.due&&new Date(a.due)<new Date(),lk=lockedBy(a.section,a.level);
+  return `<div class="q"><span class="tag">${a.level}</span><b>${esc(a.title)}</b>
+  <div class="mu">${esc(secName(a.section))} &middot; ${a.qs.length} questions &middot; due ${a.due?new Date(a.due).toLocaleString():'no deadline'}</div>
+  ${sub?`<div class="ok">Submitted: ${sub.score}/${sub.total}</div>`
+   :lk?`<div class="mu">🔒 Locked. Complete all ${lk} activities in this class first.</div>`
+   :late?'<div class="bad">Deadline passed</div>':`<button class="btn" onclick="startAct('${a.id}')">Take activity</button>`}</div>`}).join('')||'<p class="mu">Nothing published to your classes yet.</p>'}</div>`;
+}
+
+function startAct(id){
+ const a=S.activities.find(x=>x.id===id);
+ if(!a||lockedBy(a.section,a.level)){msg='Finish the previous level first.';render();return}
+ taking=id;render();
+}
+</script>
 </body>
 </html>
