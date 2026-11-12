@@ -1346,6 +1346,232 @@ function publish(){
  const d=draft;draft=null;tab='Activities';
  col('activities').add({title:d.title,level:d.level,section:d.section,due:d.due,mat:d.mat||null,qs:d.qs.map(({src,...q})=>q)}).catch(fail);render();
 }
+</script><script>
+/* LearnITAll add-on: activity types (Matching, Ordering, Enumeration) + generate from many lessons at once */
+let selLessons=new Set();
+const xPair=s=>{const i=s.indexOf('=>');return i<0?[s.trim(),'']:[s.slice(0,i).trim(),s.slice(i+2).trim()]};
+const xClean=h=>String(h||'').replace(/^(?:\d+[.)]|[•*–-])\s*/,'').replace(/[:\s]+$/,'').trim();
+
+/* ---------- find numbered steps and bullet lists in the lesson text ---------- */
+function listBlocks(text){
+ const steps=[],bullets=[];let run=[],nums=[],kind='',head='',last='';
+ const close=()=>{
+  if(run.length){
+   if(run.length>=3){
+    if(kind==='n'){
+     const qn=run.filter(x=>/\?$/.test(x)).length;
+     if(qn<run.length/2&&run.every(x=>x.length<=110&&!/=/.test(x)))steps.push({items:run,head});
+    }else bullets.push({items:run,head});
+   }
+   last='';
+  }
+  run=[];nums=[];kind='';
+ };
+ cleanLines(text).forEach(l=>{
+  if(!l)return;
+  let m;
+  if((m=l.match(/^(?:step\s*)?(\d{1,2})[.):]\s+(.{3,})$/i))){
+   if(kind!=='n'||+m[1]!==nums[nums.length-1]+1)close();
+   if(!run.length)head=last;
+   kind='n';run.push(m[2].trim());nums.push(+m[1]);
+  }else if((m=l.match(/^[•*–-]\s+(.{2,})$/))){
+   if(kind!=='b')close();
+   if(!run.length)head=last;
+   kind='b';run.push(m[1].trim());
+  }else{close();last=l}
+ });
+ close();
+ return {steps,bullets};
+}
+
+/* ---------- build matching / ordering / enumeration items ---------- */
+function mkE(items,what,lvl){
+ const n=Math.min(items.length,lvl==='Beginner'?2:lvl==='Advanced'?4:3);
+ return {t:'enum',q:'According to the lesson, list any '+n+' for: '+what,ch:items,n,a:items.join('; ')};
+}
+function actItems(text,lvl){
+ const beg=lvl==='Beginner',adv=lvl==='Advanced',np=beg?3:adv?5:4,out={match:[],order:[],lst:[]};
+ const A=analyze(text);
+ let pairs=[];const seenL=new Set(),seenR=new Set();
+ const addP=(l,r)=>{const a=l.toLowerCase(),b=r.toLowerCase();if(!l||!r||seenL.has(a)||seenR.has(b))return;seenL.add(a);seenR.add(b);pairs.push({l,r})};
+ /* matching: definitions first, then key sentences with the term blanked out */
+ A.defs.forEach(d=>{const r=fmtDef(d.def);if(r.length<=150)addP(cap((A.byK[d.k]||{disp:d.term}).disp),r)});
+ if(pairs.length<np){
+  [...A.cands].sort((a,b)=>b.score-a.score).forEach(c=>{
+   const T=c.terms[0];
+   if(pairs.length>=np||!T||c.s.length>150)return;
+   const r=blank(c.s,T.disp);
+   if(!r||pairs.some(p=>p.r.toLowerCase().includes(T.k)||c.s.toLowerCase().includes(p.l.toLowerCase())))return;
+   addP(cap(T.disp),r);
+  });
+ }
+ pairs=shuf(pairs);
+ const mkM=g=>({t:'match',q:'Match each term with the correct description.',ch:g.map(p=>p.l+' => '+p.r),a:g.map(p=>p.l+' - '+p.r).join('; ')});
+ for(let i=0;i+np<=pairs.length&&out.match.length<2;i+=np)out.match.push(mkM(pairs.slice(i,i+np)));
+ if(!out.match.length&&pairs.length>=3)out.match.push(mkM(pairs.slice(0,np)));
+ /* ordering: numbered steps */
+ const L=listBlocks(text);
+ L.steps.forEach(b=>{
+  const items=b.items.slice(0,beg?4:adv?6:5),h=b.head&&b.head.length<=80?xClean(b.head):'';
+  out.order.push({t:'order',q:'Arrange these steps in the correct order'+(h?' ('+h+')':'')+'.',ch:items,a:items.map((x,i)=>(i+1)+'. '+x).join('; ')});
+ });
+ /* enumeration: short bullet lists under a heading, and "Heading: a, b, c" lines */
+ L.bullets.forEach(b=>{
+  const it=[...new Set(b.items.map(x=>x.replace(/[.;,]+$/,'').trim()))];
+  const h=xClean(b.head);
+  if(h&&h.length<=120&&it.length>=3&&it.length===b.items.length&&it.every(x=>x.length<=60&&x.split(' ').length<=7))out.lst.push(mkE(it.slice(0,8),'“'+h+'”',lvl));
+ });
+ cleanLines(text).forEach(l=>{
+  const m=l.match(/^(?:[•*–-]\s+)?(.{8,120}?):\s*(.+)$/);if(!m)return;
+  const it=m[2].replace(/\.+$/,'').split(/\s*(?:,|;|\band\b|\bor\b)\s*/i).map(x=>x.trim()).filter(Boolean);
+  if(it.length>=3&&it.length<=8&&it.every(x=>x.length<=40&&x.split(' ').length<=5)&&new Set(it.map(x=>x.toLowerCase())).size===it.length)out.lst.push(mkE(it,'“'+xClean(m[1])+'”',lvl));
+ });
+ return out;
+}
+
+/* ---------- question builder: quiz questions and/or activity types ---------- */
+function baseQs(text,n,types,lvl){
+ const sc=scanMath(text),mq=mathQuestions(sc,n,types,lvl);
+ const tx=text.split('\n').filter(l=>!sc.lines.has(l.trim())).join('\n');
+ const want=Math.min(mq.length,Math.ceil(n/2)),r=generate(tx,n-want,types,lvl);
+ const use=Math.min(mq.length,Math.max(want,n-r.qs.length));
+ return {qs:[...r.qs.slice(0,Math.max(n-use,0)),...mq.slice(0,use)],concepts:[...(r.concepts||[]),...(mq.length?['equations, functions & word problems']:[])]};
+}
+function buildQs(text,n,tsel,lvl){
+ const wantAct=tsel==='act'?n:tsel==='all'?Math.ceil(n/3):0,acts=[];
+ if(wantAct){
+  const it=actItems(text,lvl),pools=[shuf(it.match),shuf(it.order),shuf(it.lst)];
+  while(acts.length<wantAct&&pools.some(p=>p.length))pools.forEach(p=>{if(p.length&&acts.length<wantAct)acts.push(p.shift())});
+ }
+ const types=['mc','tf','id'].includes(tsel)?[tsel]:['mc','tf','id'],nb=n-acts.length;
+ const r=nb>0?baseQs(text,nb,types,lvl):{qs:[],concepts:[]};
+ let note='';
+ if(wantAct&&acts.length<wantAct)note='Only '+acts.length+' activity-type item(s) could be built (matching needs definitions or key sentences, ordering needs numbered steps, enumeration needs bullet lists). The rest are quiz questions.';
+ else if(r.qs.length+acts.length<n)note='Only '+(r.qs.length+acts.length)+' good question(s) could be built (you asked for '+n+'). Add more lesson text for more.';
+ return {qs:[...r.qs,...acts],note,concepts:[...(r.concepts||[]),...(acts.length?['matching, ordering & enumeration']:[])]};
+}
+
+/* ---------- Create Quiz tab: tick many lessons, preview or publish directly ---------- */
+function pickLesson(id,on){on?selLessons.add(id):selLessons.delete(id)}
+function pickAll(on){selLessons=new Set(on?scoped().materials.map(m=>m.id):[]);render()}
+const pickedMats=()=>scoped().materials.filter(m=>selLessons.has(m.id));
+const mergedText=ms=>ms.map(m=>(m.text||'').trim()).filter(Boolean).join('\n\n');
+
+function gen(){
+ const ms=pickedMats();
+ if(!ms.length){alert('Tick at least one lesson first.');return}
+ const text=mergedText(ms);
+ if(!text){alert('The selected lesson(s) have no readable text. Paste the lesson text, or upload a file that contains text.');return}
+ const lvl=val('gl')||ms[0].level,r=buildQs(text,+val('gn')||5,val('gt'),lvl);
+ if(!r.qs.length){alert(r.note||'Could not build questions from these lessons.');return}
+ draft={title:ms[0].title+(ms.length>1?' + '+(ms.length-1)+' more':'')+' Activity',level:lvl,section:ms[0].section,qs:r.qs,note:r.note,concepts:r.concepts,mat:ms[0].id};
+ render();
+}
+function genPublish(){
+ const ms=pickedMats();
+ if(!ms.length){alert('Tick at least one lesson first.');return}
+ const sep=document.getElementById('gsep').checked,due=val('gd'),n=+val('gn')||5,t=val('gt'),lv=val('gl');
+ const groups={};
+ ms.forEach(m=>{const k=sep?m.id:m.section+'|'+m.level;(groups[k]=groups[k]||[]).push(m)});
+ const jobs=[],skipped=[];
+ Object.values(groups).forEach(g=>{
+  const text=mergedText(g),lvl=lv||g[0].level,r=text?buildQs(text,n,t,lvl):{qs:[]};
+  if(!r.qs.length){skipped.push(g[0].title);return}
+  jobs.push(col('activities').add({title:g[0].title+(g.length>1?' + '+(g.length-1)+' more':'')+' Activity',level:lvl,section:g[0].section,due:due,mat:g[0].id,qs:r.qs.map(({src,...q})=>q)}));
+ });
+ if(skipped.length)alert('No questions could be built from: '+skipped.join(', '));
+ if(!jobs.length)return;
+ Promise.all(jobs).then(()=>{selLessons.clear();tab='Activities';render()}).catch(fail);
+}
+
+function qEditor(q,i){
+ const x=q.t==='match'||q.t==='order'||q.t==='enum';
+ const lab=q.t==='match'?'Pairs (one per line: term => description)':q.t==='order'?'Items in the CORRECT order (one per line)':q.t==='enum'?'Accepted answers (one per line)':'Choices (one per line)';
+ return `<div class="q"><span class="tag">${q.t.toUpperCase()}</span>
+ <label>Question</label><textarea style="min-height:50px" onchange="draft.qs[${i}].q=this.value">${esc(q.q)}</textarea>
+ ${q.ch?`<label>${lab}</label><textarea style="min-height:${x?110:70}px" onchange="draft.qs[${i}].ch=this.value.split('\\n')${x?'.filter(s=>s.trim())':''}">${esc(q.ch.join('\n'))}</textarea>`:''}
+ ${q.t==='enum'?`<label>How many answers the student must give</label><input type="number" min="1" value="${q.n||1}" onchange="draft.qs[${i}].n=+this.value">`:''}
+ ${x?'':`<label>Answer key</label><input value="${esc(q.a)}" onchange="draft.qs[${i}].a=this.value">`}
+ <button class="btn s" onclick="draft.qs.splice(${i},1);render()">Delete question</button></div>`;
+}
+function CreateQuiz(){
+ const V=scoped();
+ const rows=V.materials.map(m=>`<label class="opt"><input type="checkbox" ${selLessons.has(m.id)?'checked':''} onchange="pickLesson('${m.id}',this.checked)"><span class="tag">${esc(m.level)}</span>${esc(m.title)} <span class="mu">&middot; ${esc(secName(m.section))}</span></label>`).join('');
+ let h=`<div class="card"><h2>Generate activities from lessons</h2>
+ <label>Lessons (tick one or more)</label>
+ <div style="max-height:220px;overflow:auto;border:1px solid var(--br);border-radius:8px;padding:6px 10px">${rows||'<span class="mu">Upload a lesson first.</span>'}</div>
+ <button class="btn s" onclick="pickAll(true)">Select all</button> <button class="btn s" onclick="pickAll(false)">Clear</button>
+ <div class="row"><div><label>Number of questions</label><input id="gn" type="number" value="5" min="1" max="20"></div>
+ <div><label>Types</label><select id="gt"><option value="mix">Quiz mix (MC, T/F, Identification)</option><option value="act">Activity types (Matching, Ordering, Enumeration)</option><option value="all">Everything</option><option value="mc">Multiple choice</option><option value="tf">True / False</option><option value="id">Identification</option></select></div>
+ <div><label>Difficulty</label><select id="gl"><option value="">Same as lesson level</option>${LEVELS.map(l=>`<option>${l}</option>`).join('')}</select></div>
+ <div><label>Deadline (for Publish now)</label><input type="datetime-local" id="gd"></div></div>
+ <label class="opt"><input type="checkbox" id="gsep">Make a separate activity for each ticked lesson (otherwise lessons of the same class and level are combined into one)</label>
+ <button class="btn" onclick="gen()">Generate &amp; preview</button> <button class="btn s" onclick="genPublish()">Generate &amp; publish now</button></div>`;
+ if(draft){
+  h+=`<div class="card"><h2>Preview &amp; edit</h2>
+  ${draft.concepts&&draft.concepts.length?`<div class="mu">Key concepts detected: ${draft.concepts.map(c=>`<span class="chip">${esc(c)}</span>`).join('')}</div>`:''}
+  ${draft.note?`<div class="mu bad" style="margin:6px 0">${esc(draft.note)}</div>`:''}
+  <label>Activity title</label><input id="at" value="${esc(draft.title)}">
+  <div class="row"><div><label>Level</label><select id="al">${LEVELS.map(l=>`<option ${l===draft.level?'selected':''}>${l}</option>`).join('')}</select></div>
+  <div><label>Publish to section</label><select id="as">${V.sections.map(s=>`<option value="${s.id}" ${s.id===draft.section?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div>
+  <div><label>Deadline</label><input type="datetime-local" id="ad"></div></div>
+  ${draft.qs.map(qEditor).join('')}
+  <button class="btn" onclick="publish()">Save &amp; publish</button></div>`;
+ }
+ return h;
+}
+
+/* ---------- student side: show and grade the new types ---------- */
+function qInput(q,i){
+ if(q.t==='mc')return q.ch.map(c=>`<label class="opt"><input type="radio" name="q${i}" value="${esc(c)}">${esc(c)}</label>`).join('');
+ if(q.t==='tf')return ['True','False'].map(c=>`<label class="opt"><input type="radio" name="q${i}" value="${c}">${c}</label>`).join('');
+ if(q.t==='match'){
+  const P=q.ch.map(xPair),R=[...new Set(P.map(p=>p[1]))].sort((a,b)=>a.localeCompare(b));
+  return P.map((p,j)=>`<label>${esc(p[0])}</label><select name="q${i}_${j}"><option value="">Choose the matching description</option>${R.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('')}</select>`).join('');
+ }
+ if(q.t==='order'){
+  const R=[...q.ch].sort((a,b)=>a.localeCompare(b));
+  return q.ch.map((_,j)=>`<label>Step ${j+1}</label><select name="q${i}_${j}"><option value="">Choose</option>${R.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('')}</select>`).join('');
+ }
+ if(q.t==='enum')return `<div class="mu">Give ${q.n||1} answer(s), one per line.</div><textarea name="q${i}" placeholder="One answer per line"></textarea>`;
+ return `<input name="q${i}" placeholder="Your answer">`;
+}
+function takeView(){
+ const a=S.activities.find(x=>x.id===taking);
+ return `<div class="card"><h2>${esc(a.title)}</h2>${a.qs.map((q,i)=>`<div class="q"><b>${i+1}. ${esc(q.q)}</b>${qInput(q,i)}</div>`).join('')}
+ <button class="btn" onclick="submitAct()">Submit</button> <button class="btn s" onclick="taking=null;render()">Cancel</button></div>`;
+}
+function submitAct(){
+ const a=S.activities.find(x=>x.id===taking);
+ if(passed(mySub(a))){taking=null;render();return}
+ const ans=a.qs.map((q,i)=>{
+  if(q.t==='match'||q.t==='order')return q.ch.map((_,j)=>{const e=document.querySelector(`[name=q${i}_${j}]`);return e?e.value:''}).join('||');
+  if(q.t==='enum'){const e=document.querySelector(`[name=q${i}]`);return e?e.value.split('\n').map(s=>s.trim()).filter(Boolean).join('||'):''}
+  if(q.t==='id'){const e=document.querySelector(`[name=q${i}]`);return e?e.value:''}
+  const c=document.querySelector(`[name=q${i}]:checked`);return c?c.value:'';
+ });
+ const score=grade(a,ans);
+ col('subs').doc(a.id+'_'+me.id).set({act:a.id,section:a.section,student:me.id,answers:ans,score,total:a.qs.length,at:Date.now()}).catch(fail);
+ taking=null;tab='My Scores';render();
+}
+function gradeExtra(q,a){
+ const parts=String(a??'').split('||');
+ if(q.t==='enum'){
+  const ok=new Set(q.ch.map(norm)),got=new Set(parts.map(norm).filter(x=>x&&ok.has(x)));
+  return got.size>=(q.n||1);
+ }
+ const exp=q.t==='match'?q.ch.map(p=>xPair(p)[1]):q.ch;
+ return parts.length===exp.length&&exp.every((e,j)=>norm(parts[j])===norm(e));
+}
+const _gradeBase=window.grade;
+window.grade=function(act,ans){
+ let sc=0;
+ act.qs.forEach((q,i)=>{
+  if(q.t==='match'||q.t==='order'||q.t==='enum'){if(gradeExtra(q,ans[i]))sc++}
+  else sc+=_gradeBase({qs:[q]},[ans[i]]);
+ });
+ return sc;
+};
 </script>
 </body>
 </html>
