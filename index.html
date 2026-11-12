@@ -1346,231 +1346,172 @@ function publish(){
  const d=draft;draft=null;tab='Activities';
  col('activities').add({title:d.title,level:d.level,section:d.section,due:d.due,mat:d.mat||null,qs:d.qs.map(({src,...q})=>q)}).catch(fail);render();
 }
+</script>
 </script><script>
-/* LearnITAll add-on: activity types (Matching, Ordering, Enumeration) + generate from many lessons at once */
-let selLessons=new Set();
-const xPair=s=>{const i=s.indexOf('=>');return i<0?[s.trim(),'']:[s.slice(0,i).trim(),s.slice(i+2).trim()]};
-const xClean=h=>String(h||'').replace(/^(?:\d+[.)]|[•*–-])\s*/,'').replace(/[:\s]+$/,'').trim();
+/* LearnITAll add-on: Performance Task (teacher-graded with a rubric, only when the lesson fits) */
+let ptDraft=null;
+const PT_ACT=/\b(solve|compute|calculate|construct|draw|design|build|prepare|apply|demonstrate|perform|measure|experiment|program|operate|assemble|simulate|procedure|method)\w*/gi;
+const ptTot=p=>((p&&p.rubric)||[]).reduce((s,r)=>s+(+r.pts||0),0);
+const ptLink=u=>/^https?:\/\//i.test(u||'');
 
-/* ---------- find numbered steps and bullet lists in the lesson text ---------- */
-function listBlocks(text){
- const steps=[],bullets=[];let run=[],nums=[],kind='',head='',last='';
- const close=()=>{
-  if(run.length){
-   if(run.length>=3){
-    if(kind==='n'){
-     const qn=run.filter(x=>/\?$/.test(x)).length;
-     if(qn<run.length/2&&run.every(x=>x.length<=110&&!/=/.test(x)))steps.push({items:run,head});
-    }else bullets.push({items:run,head});
-   }
-   last='';
-  }
-  run=[];nums=[];kind='';
- };
- cleanLines(text).forEach(l=>{
-  if(!l)return;
-  let m;
-  if((m=l.match(/^(?:step\s*)?(\d{1,2})[.):]\s+(.{3,})$/i))){
-   if(kind!=='n'||+m[1]!==nums[nums.length-1]+1)close();
-   if(!run.length)head=last;
-   kind='n';run.push(m[2].trim());nums.push(+m[1]);
-  }else if((m=l.match(/^[•*–-]\s+(.{2,})$/))){
-   if(kind!=='b')close();
-   if(!run.length)head=last;
-   kind='b';run.push(m[1].trim());
-  }else{close();last=l}
- });
- close();
- return {steps,bullets};
+/* ---------- decide if the lesson fits a performance task, then build it ---------- */
+function ptBuild(text,lvl){
+ const A=analyze(text),C=A.concepts.slice(0,3),sc=scanMath(text);
+ const nm=sc.funcs.length+sc.eqs.length+sc.exprs.length+sc.words.length;
+ const st=text.split('\n').filter(l=>/^\s*(?:step\s*)?\d{1,2}[.):]\s+\S/i.test(l)).length;
+ const act=(text.match(PT_ACT)||[]).length;
+ const kind=nm?'math':st>=3?'process':act>=3?'general':'';
+ if(!kind||C.length<2)return {na:1,why:'This lesson is mostly facts and definitions, so a performance task is not a good fit. Performance tasks work best for lessons with procedures, problem solving, or skills to apply. You can still use the quiz generator for it.'};
+ const beg=lvl==='Beginner',adv=lvl==='Advanced',cs=C.join(', ');
+ const topic=(A.cands.find(c=>c.topic&&c.topic.length<=60)||{}).topic||C[0];
+ const T={
+  math:beg?['Make 3 problems about '+topic+' using ideas from the lesson ('+cs+').','Solve each problem and show every step.','Check each answer and write how you checked it.']
+   :adv?['Make 5 problems about '+topic+' that get harder, using ideas from the lesson ('+cs+').','Solve each one with complete steps and justify the method you chose.','Include one common mistake: show it, explain why it is wrong, and correct it.']
+   :['Make 4 problems about '+topic+' using ideas from the lesson ('+cs+'), including one real-life situation.','Solve each problem and show every step.','Explain why each step works and check your answers.'],
+  process:beg?['Write the steps for '+topic+' in order.','Add one example, sketch or photo.','Add one tip to avoid a common mistake.']
+   :adv?['Perform or document the procedure for '+topic+' step by step.','Compare it with another possible method and decide which works better.','Explain possible errors, how to spot them, and how to fix them.']
+   :['Perform or document the procedure for '+topic+' step by step.','Explain the purpose of each step.','Apply the procedure to a real situation of your choice and show the result.'],
+  general:beg?['Explain '+cs+' in your own words.','Give one real-life example for each.','Make your output neat and organized (write-up, poster or slides).']
+   :adv?['Analyze how '+cs+' are related.','Evaluate a real situation or case using these ideas.','Defend your conclusion with evidence from the lesson.']
+   :['Explain '+cs+' and show how they are related.','Show a real-life application of each.','Choose a format (write-up, poster or slides) and make it clear and organized.']
+ }[kind];
+ const G={
+  math:{role:'a peer tutor preparing a worked-solutions sheet',situation:'Your classmates need help with '+topic+'.',product:'Problem set with complete solutions'},
+  process:{role:'a trainer who must teach others this procedure',situation:'A new learner must follow your guide to do '+topic+' correctly.',product:'Step-by-step guide with an example'},
+  general:{role:'a class reporter explaining the topic',situation:'Your class is preparing a short presentation on '+topic+'.',product:'Explainer (write-up, poster or slides)'}
+ }[kind];
+ return {pt:{goal:'Show what you learned about '+topic+'.',role:G.role,audience:'Your classmates and teacher',situation:G.situation,product:G.product,task:T,rubric:[
+  {c:'Content accuracy',pts:5,d:'Ideas from the lesson ('+cs+') are correct and used properly.'},
+  {c:'Completeness',pts:5,d:kind==='math'?'Every problem is solved and every step is shown.':'All parts of the task are done.'},
+  {c:beg?'Examples':adv?'Reasoning':'Application',pts:5,d:beg?'Clear, correct examples are given.':adv?'Choices are justified and mistakes or alternatives are analyzed.':'Ideas are applied correctly to a real situation.'},
+  {c:'Organization and clarity',pts:5,d:'Work is neat, in order, and easy to follow.'}]}};
 }
 
-/* ---------- build matching / ordering / enumeration items ---------- */
-function mkE(items,what,lvl){
- const n=Math.min(items.length,lvl==='Beginner'?2:lvl==='Advanced'?4:3);
- return {t:'enum',q:'According to the lesson, list any '+n+' for: '+what,ch:items,n,a:items.join('; ')};
-}
-function actItems(text,lvl){
- const beg=lvl==='Beginner',adv=lvl==='Advanced',np=beg?3:adv?5:4,out={match:[],order:[],lst:[]};
- const A=analyze(text);
- let pairs=[];const seenL=new Set(),seenR=new Set();
- const addP=(l,r)=>{const a=l.toLowerCase(),b=r.toLowerCase();if(!l||!r||seenL.has(a)||seenR.has(b))return;seenL.add(a);seenR.add(b);pairs.push({l,r})};
- /* matching: definitions first, then key sentences with the term blanked out */
- A.defs.forEach(d=>{const r=fmtDef(d.def);if(r.length<=150)addP(cap((A.byK[d.k]||{disp:d.term}).disp),r)});
- if(pairs.length<np){
-  [...A.cands].sort((a,b)=>b.score-a.score).forEach(c=>{
-   const T=c.terms[0];
-   if(pairs.length>=np||!T||c.s.length>150)return;
-   const r=blank(c.s,T.disp);
-   if(!r||pairs.some(p=>p.r.toLowerCase().includes(T.k)||c.s.toLowerCase().includes(p.l.toLowerCase())))return;
-   addP(cap(T.disp),r);
-  });
- }
- pairs=shuf(pairs);
- const mkM=g=>({t:'match',q:'Match each term with the correct description.',ch:g.map(p=>p.l+' => '+p.r),a:g.map(p=>p.l+' - '+p.r).join('; ')});
- for(let i=0;i+np<=pairs.length&&out.match.length<2;i+=np)out.match.push(mkM(pairs.slice(i,i+np)));
- if(!out.match.length&&pairs.length>=3)out.match.push(mkM(pairs.slice(0,np)));
- /* ordering: numbered steps */
- const L=listBlocks(text);
- L.steps.forEach(b=>{
-  const items=b.items.slice(0,beg?4:adv?6:5),h=b.head&&b.head.length<=80?xClean(b.head):'';
-  out.order.push({t:'order',q:'Arrange these steps in the correct order'+(h?' ('+h+')':'')+'.',ch:items,a:items.map((x,i)=>(i+1)+'. '+x).join('; ')});
- });
- /* enumeration: short bullet lists under a heading, and "Heading: a, b, c" lines */
- L.bullets.forEach(b=>{
-  const it=[...new Set(b.items.map(x=>x.replace(/[.;,]+$/,'').trim()))];
-  const h=xClean(b.head);
-  if(h&&h.length<=120&&it.length>=3&&it.length===b.items.length&&it.every(x=>x.length<=60&&x.split(' ').length<=7))out.lst.push(mkE(it.slice(0,8),'“'+h+'”',lvl));
- });
- cleanLines(text).forEach(l=>{
-  const m=l.match(/^(?:[•*–-]\s+)?(.{8,120}?):\s*(.+)$/);if(!m)return;
-  const it=m[2].replace(/\.+$/,'').split(/\s*(?:,|;|\band\b|\bor\b)\s*/i).map(x=>x.trim()).filter(Boolean);
-  if(it.length>=3&&it.length<=8&&it.every(x=>x.length<=40&&x.split(' ').length<=5)&&new Set(it.map(x=>x.toLowerCase())).size===it.length)out.lst.push(mkE(it,'“'+xClean(m[1])+'”',lvl));
- });
- return out;
-}
-
-/* ---------- question builder: quiz questions and/or activity types ---------- */
-function baseQs(text,n,types,lvl){
- const sc=scanMath(text),mq=mathQuestions(sc,n,types,lvl);
- const tx=text.split('\n').filter(l=>!sc.lines.has(l.trim())).join('\n');
- const want=Math.min(mq.length,Math.ceil(n/2)),r=generate(tx,n-want,types,lvl);
- const use=Math.min(mq.length,Math.max(want,n-r.qs.length));
- return {qs:[...r.qs.slice(0,Math.max(n-use,0)),...mq.slice(0,use)],concepts:[...(r.concepts||[]),...(mq.length?['equations, functions & word problems']:[])]};
-}
-function buildQs(text,n,tsel,lvl){
- const wantAct=tsel==='act'?n:tsel==='all'?Math.ceil(n/3):0,acts=[];
- if(wantAct){
-  const it=actItems(text,lvl),pools=[shuf(it.match),shuf(it.order),shuf(it.lst)];
-  while(acts.length<wantAct&&pools.some(p=>p.length))pools.forEach(p=>{if(p.length&&acts.length<wantAct)acts.push(p.shift())});
- }
- const types=['mc','tf','id'].includes(tsel)?[tsel]:['mc','tf','id'],nb=n-acts.length;
- const r=nb>0?baseQs(text,nb,types,lvl):{qs:[],concepts:[]};
- let note='';
- if(wantAct&&acts.length<wantAct)note='Only '+acts.length+' activity-type item(s) could be built (matching needs definitions or key sentences, ordering needs numbered steps, enumeration needs bullet lists). The rest are quiz questions.';
- else if(r.qs.length+acts.length<n)note='Only '+(r.qs.length+acts.length)+' good question(s) could be built (you asked for '+n+'). Add more lesson text for more.';
- return {qs:[...r.qs,...acts],note,concepts:[...(r.concepts||[]),...(acts.length?['matching, ordering & enumeration']:[])]};
-}
-
-/* ---------- Create Quiz tab: tick many lessons, preview or publish directly ---------- */
-function pickLesson(id,on){on?selLessons.add(id):selLessons.delete(id)}
-function pickAll(on){selLessons=new Set(on?scoped().materials.map(m=>m.id):[]);render()}
-const pickedMats=()=>scoped().materials.filter(m=>selLessons.has(m.id));
-const mergedText=ms=>ms.map(m=>(m.text||'').trim()).filter(Boolean).join('\n\n');
-
-function gen(){
- const ms=pickedMats();
- if(!ms.length){alert('Tick at least one lesson first.');return}
- const text=mergedText(ms);
- if(!text){alert('The selected lesson(s) have no readable text. Paste the lesson text, or upload a file that contains text.');return}
- const lvl=val('gl')||ms[0].level,r=buildQs(text,+val('gn')||5,val('gt'),lvl);
- if(!r.qs.length){alert(r.note||'Could not build questions from these lessons.');return}
- draft={title:ms[0].title+(ms.length>1?' + '+(ms.length-1)+' more':'')+' Activity',level:lvl,section:ms[0].section,qs:r.qs,note:r.note,concepts:r.concepts,mat:ms[0].id};
+/* ---------- teacher: generate / edit / publish (card added under Create Quiz) ---------- */
+function ptGen(){
+ const m=S.materials.find(x=>x.id===val('ptcm'));if(!m){alert('Upload a lesson first.');return}
+ const text=(m.text||'').trim();
+ if(!text){alert('This lesson has no readable text. Paste the lesson text, or upload a file that contains text.');return}
+ const lvl=val('ptcl')||m.level,r=ptBuild(text,lvl);
+ ptDraft=r.na?{na:1,why:r.why,mat:m.id}:{mat:m.id,title:m.title+' Performance Task',level:lvl,section:m.section,due:'',pt:r.pt};
  render();
 }
-function genPublish(){
- const ms=pickedMats();
- if(!ms.length){alert('Tick at least one lesson first.');return}
- const sep=document.getElementById('gsep').checked,due=val('gd'),n=+val('gn')||5,t=val('gt'),lv=val('gl');
- const groups={};
- ms.forEach(m=>{const k=sep?m.id:m.section+'|'+m.level;(groups[k]=groups[k]||[]).push(m)});
- const jobs=[],skipped=[];
- Object.values(groups).forEach(g=>{
-  const text=mergedText(g),lvl=lv||g[0].level,r=text?buildQs(text,n,t,lvl):{qs:[]};
-  if(!r.qs.length){skipped.push(g[0].title);return}
-  jobs.push(col('activities').add({title:g[0].title+(g.length>1?' + '+(g.length-1)+' more':'')+' Activity',level:lvl,section:g[0].section,due:due,mat:g[0].id,qs:r.qs.map(({src,...q})=>q)}));
- });
- if(skipped.length)alert('No questions could be built from: '+skipped.join(', '));
- if(!jobs.length)return;
- Promise.all(jobs).then(()=>{selLessons.clear();tab='Activities';render()}).catch(fail);
+function ptEditor(V){
+ const d=ptDraft,p=d.pt,t=ptTot(p);
+ const fld=(l,k)=>`<label>${l}</label><textarea style="min-height:56px" onchange="ptDraft.pt.${k}=this.value">${esc(p[k])}</textarea>`;
+ return `<h3 style="margin-top:16px">Preview &amp; edit</h3>
+ <label>Title</label><input value="${esc(d.title)}" onchange="ptDraft.title=this.value">
+ <div class="row"><div><label>Level</label><select onchange="ptDraft.level=this.value">${LEVELS.map(l=>`<option ${l===d.level?'selected':''}>${l}</option>`).join('')}</select></div>
+ <div><label>Publish to section</label><select onchange="ptDraft.section=this.value">${V.sections.map(s=>`<option value="${s.id}" ${s.id===d.section?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div>
+ <div><label>Deadline</label><input type="datetime-local" value="${esc(d.due||'')}" onchange="ptDraft.due=this.value"></div></div>
+ ${fld('Goal','goal')}${fld('Role','role')}${fld('Audience','audience')}${fld('Situation','situation')}${fld('Product / output','product')}
+ <label>Task steps (one per line)</label><textarea style="min-height:110px" onchange="ptDraft.pt.task=this.value.split('\\n').filter(s=>s.trim())">${esc(p.task.join('\n'))}</textarea>
+ <h3 style="margin-top:14px">Rubric</h3>
+ ${p.rubric.map((r,i)=>`<div class="row" style="align-items:end"><div><label>Criterion</label><input value="${esc(r.c)}" onchange="ptDraft.pt.rubric[${i}].c=this.value"></div>
+ <div><label>Points</label><input type="number" min="1" value="${r.pts}" onchange="ptDraft.pt.rubric[${i}].pts=Math.max(1,+this.value||1);render()"></div>
+ <div><label>What full points look like</label><input value="${esc(r.d)}" onchange="ptDraft.pt.rubric[${i}].d=this.value"></div>
+ <div><button class="btn s" onclick="ptDraft.pt.rubric.splice(${i},1);render()">Remove</button></div></div>`).join('')}
+ <div class="mu" style="margin-top:8px">Total ${t} points. Students need 75% (${Math.ceil(t*PASS*10)/10} points) to pass.</div>
+ <button class="btn s" onclick="ptDraft.pt.rubric.push({c:'New criterion',pts:5,d:''});render()">Add criterion</button>
+ <button class="btn" onclick="ptPublish()">Save &amp; publish</button>`;
 }
-
-function qEditor(q,i){
- const x=q.t==='match'||q.t==='order'||q.t==='enum';
- const lab=q.t==='match'?'Pairs (one per line: term => description)':q.t==='order'?'Items in the CORRECT order (one per line)':q.t==='enum'?'Accepted answers (one per line)':'Choices (one per line)';
- return `<div class="q"><span class="tag">${q.t.toUpperCase()}</span>
- <label>Question</label><textarea style="min-height:50px" onchange="draft.qs[${i}].q=this.value">${esc(q.q)}</textarea>
- ${q.ch?`<label>${lab}</label><textarea style="min-height:${x?110:70}px" onchange="draft.qs[${i}].ch=this.value.split('\\n')${x?'.filter(s=>s.trim())':''}">${esc(q.ch.join('\n'))}</textarea>`:''}
- ${q.t==='enum'?`<label>How many answers the student must give</label><input type="number" min="1" value="${q.n||1}" onchange="draft.qs[${i}].n=+this.value">`:''}
- ${x?'':`<label>Answer key</label><input value="${esc(q.a)}" onchange="draft.qs[${i}].a=this.value">`}
- <button class="btn s" onclick="draft.qs.splice(${i},1);render()">Delete question</button></div>`;
-}
-function CreateQuiz(){
+function ptCard(){
  const V=scoped();
- const rows=V.materials.map(m=>`<label class="opt"><input type="checkbox" ${selLessons.has(m.id)?'checked':''} onchange="pickLesson('${m.id}',this.checked)"><span class="tag">${esc(m.level)}</span>${esc(m.title)} <span class="mu">&middot; ${esc(secName(m.section))}</span></label>`).join('');
- let h=`<div class="card"><h2>Generate activities from lessons</h2>
- <label>Lessons (tick one or more)</label>
- <div style="max-height:220px;overflow:auto;border:1px solid var(--br);border-radius:8px;padding:6px 10px">${rows||'<span class="mu">Upload a lesson first.</span>'}</div>
- <button class="btn s" onclick="pickAll(true)">Select all</button> <button class="btn s" onclick="pickAll(false)">Clear</button>
- <div class="row"><div><label>Number of questions</label><input id="gn" type="number" value="5" min="1" max="20"></div>
- <div><label>Types</label><select id="gt"><option value="mix">Quiz mix (MC, T/F, Identification)</option><option value="act">Activity types (Matching, Ordering, Enumeration)</option><option value="all">Everything</option><option value="mc">Multiple choice</option><option value="tf">True / False</option><option value="id">Identification</option></select></div>
- <div><label>Difficulty</label><select id="gl"><option value="">Same as lesson level</option>${LEVELS.map(l=>`<option>${l}</option>`).join('')}</select></div>
- <div><label>Deadline (for Publish now)</label><input type="datetime-local" id="gd"></div></div>
- <label class="opt"><input type="checkbox" id="gsep">Make a separate activity for each ticked lesson (otherwise lessons of the same class and level are combined into one)</label>
- <button class="btn" onclick="gen()">Generate &amp; preview</button> <button class="btn s" onclick="genPublish()">Generate &amp; publish now</button></div>`;
- if(draft){
-  h+=`<div class="card"><h2>Preview &amp; edit</h2>
-  ${draft.concepts&&draft.concepts.length?`<div class="mu">Key concepts detected: ${draft.concepts.map(c=>`<span class="chip">${esc(c)}</span>`).join('')}</div>`:''}
-  ${draft.note?`<div class="mu bad" style="margin:6px 0">${esc(draft.note)}</div>`:''}
-  <label>Activity title</label><input id="at" value="${esc(draft.title)}">
-  <div class="row"><div><label>Level</label><select id="al">${LEVELS.map(l=>`<option ${l===draft.level?'selected':''}>${l}</option>`).join('')}</select></div>
-  <div><label>Publish to section</label><select id="as">${V.sections.map(s=>`<option value="${s.id}" ${s.id===draft.section?'selected':''}>${esc(s.name)}</option>`).join('')}</select></div>
-  <div><label>Deadline</label><input type="datetime-local" id="ad"></div></div>
-  ${draft.qs.map(qEditor).join('')}
-  <button class="btn" onclick="publish()">Save &amp; publish</button></div>`;
- }
- return h;
+ return `<div class="card"><h2>Performance task</h2>
+ <p class="mu">Builds a hands-on task with a rubric from a lesson, only if the lesson fits (procedures, problem solving, skills to apply). You grade submissions yourself under Results.</p>
+ <label>Lesson</label><select id="ptcm">${V.materials.map(m=>`<option value="${m.id}" ${ptDraft&&ptDraft.mat===m.id?'selected':''}>${esc(m.title)}</option>`).join('')}</select>
+ <div class="row"><div><label>Difficulty</label><select id="ptcl"><option value="">Same as lesson level</option>${LEVELS.map(l=>`<option>${l}</option>`).join('')}</select></div></div>
+ <button class="btn" onclick="ptGen()">Generate performance task</button>
+ ${ptDraft&&ptDraft.na?`<div class="mu bad" style="margin-top:8px">${esc(ptDraft.why)}</div>`:ptDraft?ptEditor(V):''}</div>`;
 }
+function ptPublish(){
+ const d=ptDraft;if(!d||!d.pt)return;
+ const total=ptTot(d.pt);
+ if(!String(d.title||'').trim()||!d.pt.rubric.length||!total||!d.pt.task.length){alert('Add a title, at least one task step, and at least one rubric criterion.');return}
+ col('activities').add({title:d.title.trim(),level:d.level,section:d.section,due:d.due||'',mat:d.mat,kind:'pt',qs:[],pt:{...d.pt,total}}).catch(fail);
+ ptDraft=null;tab='Activities';render();
+}
+const _ptCQ=window.CreateQuiz;
+window.CreateQuiz=function(){return _ptCQ()+ptCard()};
 
-/* ---------- student side: show and grade the new types ---------- */
-function qInput(q,i){
- if(q.t==='mc')return q.ch.map(c=>`<label class="opt"><input type="radio" name="q${i}" value="${esc(c)}">${esc(c)}</label>`).join('');
- if(q.t==='tf')return ['True','False'].map(c=>`<label class="opt"><input type="radio" name="q${i}" value="${c}">${c}</label>`).join('');
- if(q.t==='match'){
-  const P=q.ch.map(xPair),R=[...new Set(P.map(p=>p[1]))].sort((a,b)=>a.localeCompare(b));
-  return P.map((p,j)=>`<label>${esc(p[0])}</label><select name="q${i}_${j}"><option value="">Choose the matching description</option>${R.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('')}</select>`).join('');
- }
- if(q.t==='order'){
-  const R=[...q.ch].sort((a,b)=>a.localeCompare(b));
-  return q.ch.map((_,j)=>`<label>Step ${j+1}</label><select name="q${i}_${j}"><option value="">Choose</option>${R.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('')}</select>`).join('');
- }
- if(q.t==='enum')return `<div class="mu">Give ${q.n||1} answer(s), one per line.</div><textarea name="q${i}" placeholder="One answer per line"></textarea>`;
- return `<input name="q${i}" placeholder="Your answer">`;
+/* teacher lists */
+window.Activities=function(){
+ const V=scoped();
+ return `<div class="card"><h2>Activities</h2>${V.activities.map(a=>`<div class="q"><span class="tag">${esc(a.level)}</span>${a.kind==='pt'?'<span class="tag" style="background:var(--ok)">Performance task</span>':''}<b>${esc(a.title)}</b>
+ <div class="mu">${esc(secName(a.section))} &middot; ${a.kind==='pt'?ptTot(a.pt)+' points':a.qs.length+' questions'} &middot; due ${a.due?new Date(a.due).toLocaleString():'no deadline'}</div>
+ <button class="btn d" onclick="delAct('${a.id}')">Delete</button></div>`).join('')||'<p class="mu">No activities yet.</p>'}</div>`;
+};
+/* submissions waiting for grading are kept out of averages and the normal results table */
+const _ptScoped=window.scoped;
+window.scoped=function(){const v=_ptScoped();v.subs=v.subs.filter(x=>!x.pending);return v};
+
+/* ---------- teacher: grade with the rubric (shown at the top of Results) ---------- */
+function ptGradeCard(){
+ const ids=S.hosted.map(s=>s.id),acts=S.activities.filter(a=>a.kind==='pt'&&ids.includes(a.section));
+ if(!acts.length)return '';
+ const rows=S.subs.filter(x=>acts.some(a=>a.id===x.act)).sort((a,b)=>(b.pending?1:0)-(a.pending?1:0)||(b.at||0)-(a.at||0));
+ return `<div class="card"><h2>Performance tasks to grade</h2>${rows.map(x=>{
+  const a=acts.find(q=>q.id===x.act),u=S.students.find(s=>s.id===x.student&&s.section===x.section),R=a.pt.rubric||[];
+  const ans=(x.answers||[])[0]||'',lk=(x.answers||[])[1]||'';
+  return `<details class="q" ${x.pending?'open':''}><summary style="cursor:pointer"><b>${esc(u?u.name:'Student')}</b> <span class="mu">&middot; ${esc(a.title)} &middot; ${x.pending?'<span class="bad">Needs grading</span>':x.score+'/'+x.total+' graded'}</span></summary>
+  <label>Student's answer</label><div style="white-space:pre-wrap;border:1px solid var(--br);border-radius:8px;padding:8px">${esc(ans)||'<span class="mu">(no text)</span>'}</div>
+  ${lk?`<div class="mu" style="margin-top:6px">Link: ${ptLink(lk)?`<a href="${esc(lk)}" target="_blank" rel="noopener noreferrer">${esc(lk)}</a>`:esc(lk)}</div>`:''}
+  <table><tr><th>Criterion</th><th>Score</th></tr>${R.map((r,i)=>`<tr><td><b>${esc(r.c)}</b><div class="mu">${esc(r.d)}</div></td><td style="width:110px"><input type="number" min="0" max="${r.pts}" step="0.5" id="pg_${x.id}_${i}" value="${x.marks&&x.marks[i]!=null?x.marks[i]:''}" placeholder="/ ${r.pts}"></td></tr>`).join('')}</table>
+  <label>Feedback to student (optional)</label><textarea id="pf_${x.id}" style="min-height:60px">${esc(x.feedback||'')}</textarea>
+  <button class="btn" onclick="ptSaveGrade('${x.id}')">Save grade</button></details>`}).join('')||'<p class="mu">No submissions yet.</p>'}</div>`;
 }
-function takeView(){
+function ptSaveGrade(id){
+ const x=S.subs.find(s=>s.id===id),a=x&&S.activities.find(q=>q.id===x.act);if(!a)return;
+ const R=a.pt.rubric||[],marks=R.map((r,i)=>{const v=parseFloat(document.getElementById('pg_'+id+'_'+i).value);return Number.isFinite(v)?Math.min(Math.max(v,0),r.pts):null});
+ if(marks.some(m=>m===null)){alert('Enter a score for every criterion.');return}
+ col('subs').doc(id).update({score:marks.reduce((s,v)=>s+v,0),total:R.reduce((s,r)=>s+r.pts,0),marks,feedback:document.getElementById('pf_'+id).value.trim(),pending:false,gradedAt:Date.now()}).catch(fail);
+}
+const _ptRes=window.Results;
+window.Results=function(){return ptGradeCard()+_ptRes()};
+
+/* ---------- student: card, task page, submit ---------- */
+const _ptCard=window.actCard;
+window.actCard=function(a){
+ if(a.kind!=='pt')return _ptCard(a);
+ const sub=mySub(a),late=a.due&&new Date(a.due)<new Date(),lk=lockedBy(a.section,a.level);
+ const fb=sub&&sub.feedback?`<div class="mu">Teacher feedback: ${esc(sub.feedback)}</div>`:'';
+ let st;
+ if(lk)st=`<div class="mu">🔒 Locked. Pass all ${lk} activities (75%+) first.</div>`;
+ else if(sub&&sub.pending)st=`<div class="mu">Submitted. Waiting for your teacher to grade it.</div><button class="btn s" onclick="startAct('${a.id}')">Edit submission</button>`;
+ else if(sub&&passed(sub))st=`<div class="ok">Passed: ${sub.score}/${sub.total} (${Math.round(sub.score/sub.total*100)}%)</div>${fb}`;
+ else if(sub)st=`<div class="bad">Not passed: ${sub.score}/${sub.total} (${Math.round(sub.score/sub.total*100)}%). You need 75% to continue.</div>${fb}<button class="btn" onclick="startAct('${a.id}')">Revise and resubmit</button>`;
+ else if(late)st='<div class="bad">Deadline passed</div>';
+ else st=`<button class="btn" onclick="startAct('${a.id}')">Start performance task</button>`;
+ return `<div class="q"><span class="tag">${esc(a.level)}</span><span class="tag" style="background:var(--ok)">Performance task</span><b>${esc(a.title)}</b>
+ <div class="mu">${esc(secName(a.section))} &middot; ${ptTot(a.pt)} points &middot; due ${a.due?new Date(a.due).toLocaleString():'no deadline'}</div>${st}</div>`;
+};
+const _ptTake=window.takeView;
+window.takeView=function(){
  const a=S.activities.find(x=>x.id===taking);
- return `<div class="card"><h2>${esc(a.title)}</h2>${a.qs.map((q,i)=>`<div class="q"><b>${i+1}. ${esc(q.q)}</b>${qInput(q,i)}</div>`).join('')}
+ if(!a||a.kind!=='pt')return _ptTake();
+ const p=a.pt,sub=mySub(a),R=p.rubric||[],old=(sub&&sub.answers)||[];
+ return `<div class="card"><h2>${esc(a.title)}</h2><div class="mu">Performance task &middot; ${ptTot(p)} points &middot; 75% to pass</div>
+ <table style="margin-top:8px"><tr><th>Goal</th><td>${esc(p.goal)}</td></tr><tr><th>Role</th><td>${esc(p.role)}</td></tr><tr><th>Audience</th><td>${esc(p.audience)}</td></tr><tr><th>Situation</th><td>${esc(p.situation)}</td></tr><tr><th>Product</th><td>${esc(p.product)}</td></tr></table>
+ <h3 style="margin-top:14px">What you need to do</h3><ol>${p.task.map(t=>`<li>${esc(t)}</li>`).join('')}</ol>
+ <h3>How you will be graded</h3><table><tr><th>Criteria</th><th>Points</th></tr>${R.map(r=>`<tr><td><b>${esc(r.c)}</b><div class="mu">${esc(r.d)}</div></td><td>${r.pts}</td></tr>`).join('')}</table>
+ <label>Your answer / explanation</label><textarea id="pta" style="min-height:160px">${esc(old[0]||'')}</textarea>
+ <label>Link to your work (optional: Google Drive, YouTube, etc. Anyone with the link must be able to view it)</label><input id="ptk" value="${esc(old[1]||'')}">
  <button class="btn" onclick="submitAct()">Submit</button> <button class="btn s" onclick="taking=null;render()">Cancel</button></div>`;
-}
-function submitAct(){
+};
+const _ptSubmit=window.submitAct;
+window.submitAct=function(){
  const a=S.activities.find(x=>x.id===taking);
- if(passed(mySub(a))){taking=null;render();return}
- const ans=a.qs.map((q,i)=>{
-  if(q.t==='match'||q.t==='order')return q.ch.map((_,j)=>{const e=document.querySelector(`[name=q${i}_${j}]`);return e?e.value:''}).join('||');
-  if(q.t==='enum'){const e=document.querySelector(`[name=q${i}]`);return e?e.value.split('\n').map(s=>s.trim()).filter(Boolean).join('||'):''}
-  if(q.t==='id'){const e=document.querySelector(`[name=q${i}]`);return e?e.value:''}
-  const c=document.querySelector(`[name=q${i}]:checked`);return c?c.value:'';
- });
- const score=grade(a,ans);
- col('subs').doc(a.id+'_'+me.id).set({act:a.id,section:a.section,student:me.id,answers:ans,score,total:a.qs.length,at:Date.now()}).catch(fail);
+ if(!a||a.kind!=='pt')return _ptSubmit();
+ const t=document.getElementById('pta').value.trim(),k=document.getElementById('ptk').value.trim();
+ if(!t&&!k){alert('Write your answer or add a link to your work.');return}
+ if(k&&!ptLink(k)){alert('The link must start with http:// or https://');return}
+ col('subs').doc(a.id+'_'+me.id).set({act:a.id,section:a.section,student:me.id,answers:[t,k],score:0,total:ptTot(a.pt),pending:true,at:Date.now()}).catch(fail);
  taking=null;tab='My Scores';render();
-}
-function gradeExtra(q,a){
- const parts=String(a??'').split('||');
- if(q.t==='enum'){
-  const ok=new Set(q.ch.map(norm)),got=new Set(parts.map(norm).filter(x=>x&&ok.has(x)));
-  return got.size>=(q.n||1);
- }
- const exp=q.t==='match'?q.ch.map(p=>xPair(p)[1]):q.ch;
- return parts.length===exp.length&&exp.every((e,j)=>norm(parts[j])===norm(e));
-}
-const _gradeBase=window.grade;
-window.grade=function(act,ans){
- let sc=0;
- act.qs.forEach((q,i)=>{
-  if(q.t==='match'||q.t==='order'||q.t==='enum'){if(gradeExtra(q,ans[i]))sc++}
-  else sc+=_gradeBase({qs:[q]},[ans[i]]);
- });
- return sc;
+};
+window.MyScores=function(){
+ const mine=S.subs.filter(s=>s.student===me.id);
+ return `<div class="card"><h2>My scores</h2><table><tr><th>Activity</th><th>Score</th></tr>
+ ${mine.map(s=>{const a=S.activities.find(x=>x.id===s.act);return `<tr><td>${esc(a&&a.title)}</td><td>${s.pending?'<span class="mu">Awaiting grading</span>':s.score+'/'+s.total}</td></tr>`}).join('')||'<tr><td colspan=2 class="mu">No scores yet.</td></tr>'}</table></div>`;
 };
 </script>
 </body>
