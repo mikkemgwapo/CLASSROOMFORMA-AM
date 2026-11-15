@@ -2377,6 +2377,555 @@ window.submitAct=function(){
  }
  return qgSubmitPrev();
 };
+</script><script>
+/* =====================================================================
+   LearnITAll add-on v3: cleaner lesson filtering, questions that make sense, smarter retake
+   - only real teaching sentences are used (titles, headings, objectives, worksheet lines, instructions are dropped)
+   - blanks are only made where the rest of the sentence still identifies the answer
+   - wrong choices are same-kind terms from the lesson and are checked so they cannot also be correct
+   - false statements are only made with safe edits (negation, opposite word, changed number, swapped term)
+   - retake builds a NEW set (different sentences, then different answers), and never fails to start
+   - typed answers accept plurals and one-letter typos
+   All new names start with "qg" so nothing in the other add-ons is overwritten by accident.
+   ===================================================================== */
+
+const QG_WEAK=new Set('thing things something example examples result results number numbers part parts way ways kind kinds type types amount level levels place time times people person group groups area areas order case cases point points form forms work works great large small several certain common general special major main basic simple usually important different similar possible able easy using name names word words idea ideas fact facts'.split(' '));
+const QG_META=/\b(?:learning (?:competenc|objective|outcome)\w*|objectives?\s*:|competenc(?:y|ies)\s*:|worksheet|activity sheet|answer key|quiz\b|bibliography|prepared by|table of contents|let us|let's|you will|you are going|students? will|learners? will|at the end of (?:the|this)|by the end of (?:the|this)|after (?:this|the) (?:lesson|module|unit)|in this (?:lesson|module|unit|chapter|topic|activity)|this (?:lesson|module|unit|chapter)|today we|refer to (?:the|page|figure|table|your)|see (?:page|figure|table)|as (?:shown|mentioned|discussed|stated|seen) (?:above|below|earlier|in)|(?:mentioned|discussed|shown) (?:above|earlier|below)|previous lesson|figure\s*\d|table\s*\d|the following|next page|discuss with|your teacher|your classmates|pre-?test|post-?test|warm-?up|copyright)/i;
+const QG_IMP=/^(?:study|read|fill|choose|write|complete|copy|answer|discuss|look|observe|identify|match|circle|underline|draw|solve|list|name|give|explain|describe|define|tell|think|remember|note|try)\b/i;
+const QG_DANGLE=/^(?:this|that|these|those|it|its|they|them|he|she|there|such|but|and|so|their|another|other|which|who|whose|both|either|neither|because|however|therefore|thus|also|moreover|furthermore|in addition|for example|for instance|as a result|similarly|likewise|meanwhile|finally|hence|consequently|additionally|overall|in conclusion|in summary|then)\b|^(?:first|second|third|next|lastly)\s*,/i;
+const QG_VERB=/\b(?:is|are|was|were|be|been|being|has|have|had|can|could|may|might|must|will|would|should|does|do|did|ay|means|refers?|consists?|contains?|includes?|occurs?|forms?|produces?|uses?|helps?|allows?|causes?|results?|makes?|requires?|provides?|involves?|depends?|determines?|represents?|describes?|shows?|gives?|takes?|moves?|changes?|converts?|transfers?|controls?|stores?|connects?|measures?|called|known|used|made|found|formed|caused|produced|needed|based)\b|\b\p{L}{3,}(?:ed|ing|ize|ise|ify|ates?)\b/iu;
+const QG_PRON=/^(?:it|this|that|these|those|they|he|she|there|we|you|which|what|who|example|note|figure|table|step)\b/i;
+const QG_ANT=[['increase','decrease'],['increases','decreases'],['increased','decreased'],['increasing','decreasing'],['higher','lower'],['more','less'],['greater','smaller'],['larger','smaller'],['faster','slower'],['before','after'],['above','below'],['always','never'],['positive','negative'],['gain','lose'],['gains','loses'],['absorb','release'],['absorbs','releases'],['absorbed','released'],['maximum','minimum'],['inside','outside'],['rises','falls'],['expands','contracts'],['heavier','lighter'],['stronger','weaker'],['longer','shorter'],['warmer','cooler'],['conductor','insulator'],['conductors','insulators'],['input','output'],['same','different'],['open','closed'],['hot','cold']];
+const QG_K={
+ Beginner:{mc:['defMC','blankMC'],tf:['tf'],id:['defID','blankID']},
+ Intermediate:{mc:['termDef','defMC','blankMC','which'],tf:['tf'],id:['defID','blankID']},
+ Advanced:{mc:['which','notTrue','termDef','blankMC'],tf:['tf'],id:['defID','blankID']}
+};
+
+const qgAcr=w=>/^\p{Lu}{2,6}$/u.test(w);
+const qgNorm=s=>' '+String(s).toLowerCase().replace(/[^\p{L}\d' -]+/gu,' ').replace(/\s+/g,' ').trim()+' ';
+const qgW=s=>(String(s||'').toLowerCase().match(/\p{L}{4,}|\d+/gu)||[]).filter(w=>!STOP.has(w));
+const qgAdj=/(?:ful|ous|ive|able|ible|less|ish|ical|ary)$/;
+function qgKey(w){
+ const l=w.toLowerCase();
+ if(qgAcr(w))return !STOP.has(l);
+ return w.length>=5&&!STOP.has(l)&&!QG_WEAK.has(l)&&!/ly$/.test(l);
+}
+function qgKind(t){
+ const last=t.k.split(' ').pop();
+ return (t.k.includes(' ')?'m':'s')+(qgAcr(t.d)?'a':'')+(t.proper?'p':'')+(/(?:ing|ed)$/.test(last)?'v':'')+(qgAdj.test(last)?'j':'')+(/[^su]s$/.test(last)&&!/(?:ics|ness)$/.test(last)?'n':'');
+}
+function qgOcc(s,k){return (s.match(new RegExp('(^|[^\\p{L}])'+reEsc(k)+'(?:s|es)?(?![\\p{L}])','giu'))||[]).length}
+
+/* ---------- 1. FILTER: lesson text -> clean teaching sentences ---------- */
+function qgHeading(b,prevEnd){
+ const wc=b.split(' ').length;
+ if(/[.!?]$/.test(b)||wc>10||!prevEnd)return false;
+ if(capsHeavy(b)||/^(?:unit|lesson|module|chapter|week|day|topic|part|section|activity|quiz|exercise|review|summary|references?|objectives?)\b/i.test(b))return true;
+ const ws=b.match(/\p{L}+/gu)||[];
+ if(ws.length&&ws.filter(x=>/^\p{Lu}/u.test(x)).length/ws.length>=.6)return true;
+ return wc<=4||(wc<=6&&!QG_VERB.test(b));
+}
+function qgItems(raw){
+ raw=String(raw||'').replace(/[ \t]+([.,;:!?)])/g,'$1').replace(/\([ \t]+/g,'(');
+ const L=cleanLines(raw),items=[];let topic='',buf=[],bul=null,prevEnd=true;
+ const flush=()=>{
+  if(buf.length){splitSentences(buf.join(' ')).forEach(s=>items.push({s:s.trim(),topic,bul:false}));buf=[]}
+  if(bul){const b=bul.join(' ').trim();if(b.split(' ').length>=7)splitSentences(b).forEach(s=>items.push({s:s.trim(),topic,bul:true}));bul=null}
+ };
+ L.forEach(l=>{
+  if(!l){flush();prevEnd=true;return}
+  const m=l.match(/^(?:[•●▪◦]|[-–*]|\d+[.)]|[a-zA-Z][.)])\s+(.*)$/),b=(m?m[1]:l).trim(),wc=b.split(' ').length;
+  if(!b)return;
+  if(bul&&!m&&!prevEnd&&!capsHeavy(b)){bul.push(b);prevEnd=/[.!?]["”)]?$/.test(b);return}
+  if(/:$/.test(b)){flush();if(wc<=8)topic=b.replace(/:$/,'');prevEnd=true;return}
+  if(!m&&qgHeading(b,prevEnd)){flush();topic=b;prevEnd=true;return}
+  if(m){flush();bul=[b];prevEnd=/[.!?]["”)]?$/.test(b);return}
+  buf.push(b);prevEnd=/[.!?]["”)]?$/.test(b);
+ });
+ flush();
+ return items;
+}
+function qgSentOK(s,bul){
+ const w=s.split(/\s+/).length;
+ if(w<7||w>34||s.length>280||s.length<35)return false;
+ if(!/^[\p{Lu}\d“"(]/u.test(s))return false;
+ if(!bul&&!/[.!]["”)]?$/.test(s))return false;
+ if(bul&&!/[.!]["”)]?$/.test(s)&&(STOP.has((s.match(/(\p{L}+)\W*$/u)||[])[1]?.toLowerCase())||w<9))return false;
+ if(STOP.has((s.replace(/[.!"”)]+$/,'').match(/(\p{L}+)$/u)||[])[1]?.toLowerCase()))return false;
+ if(/\?\s*$/.test(s)||/_{2,}|\.{3,}|…/.test(s))return false;
+ if(/[=→←⇒|<>{}\[\]]/.test(s)||/https?:|www\.|@/.test(s))return false;
+ if(/^\d+[.)]\s/.test(s))return false;
+ if(QG_META.test(s)||QG_DANGLE.test(s)||QG_IMP.test(s))return false;
+ if(!QG_VERB.test(s))return false;
+ if((s.match(/\p{L}/gu)||[]).length/s.length<.72)return false;
+ const ws=s.match(/\p{L}+/gu)||[];
+ if(ws.length>=4&&ws.filter(x=>/^\p{Lu}/u.test(x)).length/ws.length>.6)return false;
+ if(capsHeavy(s))return false;
+ if((s.match(/\(/g)||[]).length!==(s.match(/\)/g)||[]).length)return false;
+ return true;
+}
+
+/* ---------- 2. definitions ("X is defined as ...", "... is called X", "X refers to ...", "X is a ...") ---------- */
+function qgDef(s){
+ const t=s.replace(/[.!]+$/,'');let m,term=null,def=null;
+ const okT=x=>{
+  x=String(x||'').trim().replace(/^(?:an?|the)\s+/i,'');
+  const ws=x.split(/\s+/);
+  if(!x||ws.length>4||/[,;:()"“]/.test(x)||QG_PRON.test(x)||/\b(?:is|are|was|were|can|will|has|have|do|does|may|must)\b/i.test(x))return null;
+  if(!ws.some(qgKey)||STOP.has(ws[0].toLowerCase()))return null;
+  return x;
+ };
+ if((m=t.match(/^(.{3,60}?)\s+(?:is|are)\s+(?:defined as|described as|referred to as)\s+(.{12,})$/i))){term=okT(m[1]);def=m[2]}
+ else if((m=t.match(/^(.{12,}?)\s+(?:is|are)\s+(?:called|known as|termed|named)\s+(?:the\s+)?([^,;]{3,40})$/i))){term=okT(m[2]);def=m[1]}
+ else if((m=t.match(/^(.{3,60}?)\s+(?:refers? to|means|denotes)\s+(.{12,})$/i))){term=okT(m[1]);def=m[2]}
+ else if((m=t.match(/^(?:an?|the)?\s*([\p{L}][\p{L}\- ]{2,40}?)\s+(?:is|are)\s+((?:an?|the|any|one of)\s.{14,})$/iu))){term=okT(m[1]);def=m[2]}
+ if(!term||!def)return null;
+ def=def.trim();
+ if(def.split(/\s+/).length<5||QG_DANGLE.test(def)||def.toLowerCase().includes(term.toLowerCase()))return null;
+ return {term,def,k:term.toLowerCase()};
+}
+
+/* ---------- 3. analyse the lesson ---------- */
+function qgFeat(x){
+ const s=x.s;
+ return {len:s.length,def:!!x.def,num:/\d/.test(s),
+  cause:/\b(because|therefore|thus|as a result|results? in|leads? to|led to|causes?|caused|due to|so that|consequently)\b/i.test(s),
+  cmp:/\b(while|whereas|unlike|compared|rather than|differs?|different from|than|both|either)\b/i.test(s)};
+}
+function qgLvl(f,lvl){
+ if(lvl==='Beginner')return (f.def?3:0)+(f.len<=120?2:f.len>170?-3:0)+(f.cause?-1.5:0)+(f.cmp?-1:0);
+ if(lvl==='Advanced')return (f.cause?2.5:0)+(f.cmp?2:0)+(f.len>=100?1.5:f.len<75?-3:0)+(f.num?1.5:0)+(f.def?-1:0);
+ return (f.def?1.2:0)+(f.len>=70&&f.len<=170?1.5:0)+(f.cause?1.2:0)+(f.num?.5:0);
+}
+function qgPrep(text){
+ const seen=new Set(),sents=[];
+ qgItems(text).forEach(it=>{
+  const s=it.s.replace(/\s+/g,' ').replace(/^[“"]+|[”"]+$/g,'').trim(),k=s.toLowerCase();
+  if(seen.has(k)||!qgSentOK(s,it.bul))return;
+  seen.add(k);sents.push({s,topic:it.topic||'',idx:sents.length,h:g2hash(s)});
+ });
+ const bi={},capMid={},lowMid={},artB={};
+ sents.forEach(x=>{
+  x.t=toks(x.s);
+  x.t.forEach((o,j)=>{
+   if(!qgKey(o.w))return;
+   const l=o.w.toLowerCase();
+   if(j>0){if(/^\p{Lu}/u.test(o.w)&&!qgAcr(o.w))capMid[l]=(capMid[l]||0)+1;else lowMid[l]=(lowMid[l]||0)+1;if(/^(?:the|a|an|its|their|of|this|each|any|some|our|his|her)$/i.test(x.t[j-1].w))artB[l]=1}
+   if(j+1<x.t.length&&x.t[j+1].adj&&qgKey(x.t[j+1].w)){const k2=l+' '+x.t[j+1].w.toLowerCase();bi[k2]=(bi[k2]||0)+1}
+  });
+ });
+ const tinfo={},df={};
+ const mkT=(k,d)=>{
+  if(!tinfo[k]){const proper=k.split(' ').some(w=>capMid[w]&&!lowMid[w]);const ws=k.split(' '),last=ws[ws.length-1];tinfo[k]={k,d:qgAcr(d)||proper?d:d.toLowerCase(),proper,noun:ws.length>1||qgAcr(d)||proper||!!artB[last]||(/(?:tion|sion|ment|ity|ism|ness|ance|ence|ology|ics|ide|ure|ist|ware|work|ase)$/.test(last))}}
+  return tinfo[k];
+ };
+ sents.forEach(x=>{
+  x.def=qgDef(x.s);
+  const ks=new Set();
+  x.t.forEach((o,j)=>{
+   if(!qgKey(o.w))return;
+   const l=o.w.toLowerCase();ks.add(mkT(l,o.w).k);
+   if(j+1<x.t.length&&x.t[j+1].adj&&qgKey(x.t[j+1].w)){const k2=l+' '+x.t[j+1].w.toLowerCase();if(bi[k2]>=2)ks.add(mkT(k2,o.w+' '+x.t[j+1].w).k)}
+  });
+  if(x.def){const t=mkT(x.def.k,x.def.term);t.def=1;t.noun=true;t.d=qgAcr(x.def.term)||t.proper?x.def.term:x.def.term.toLowerCase();ks.add(x.def.k)}
+  x.c=[...ks];ks.forEach(k=>{df[k]=(df[k]||0)+1});
+ });
+ const nS=sents.length;
+ Object.values(tinfo).forEach(t=>{t.df=df[t.k]||1;t.multi=t.k.includes(' ')});
+ const topicTerms={};
+ sents.forEach(x=>{x.c=x.c.map(k=>tinfo[k]);x.f=qgFeat(x);(topicTerms[x.topic]=topicTerms[x.topic]||new Set());x.c.forEach(t=>topicTerms[x.topic].add(t.k))});
+ const defs=[],dk=new Set();
+ sents.forEach(x=>{if(x.def&&!dk.has(x.def.k)){dk.add(x.def.k);defs.push(x.def)}});
+ const terms=Object.values(tinfo);
+ const concepts=terms.filter(t=>!t.multi||t.df>=2).sort((a,b)=>(b.df*(b.multi?1.6:1)+(b.def?3:0))-(a.df*(a.multi?1.6:1)+(a.def?3:0))).slice(0,8).map(t=>t.d);
+ return {sents,terms,byK:tinfo,defs,nS,topicTerms,concepts,low:sents.map(x=>qgNorm(x.s)).join(''),seenA:new Set()};
+}
+
+/* ---------- 4. blanks and wrong choices ---------- */
+function qgBlank(s,term){
+ const m=new RegExp('(^|[^\\p{L}])('+reEsc(term)+')((?:s|es)?)(?![\\p{L}])','iu').exec(s);
+ if(!m||m[3])return null;
+ const start=m.index+m[1].length,end=start+m[2].length,before=s.slice(0,start),after=s.slice(end);
+ if(/(?:,|\band|\bor)\s*$/i.test(before)||/^\s*(?:,|and\b|or\b)/i.test(after))return null;
+ const out=before+'_____'+after;
+ if((out.match(/\p{L}{4,}/gu)||[]).filter(w=>!STOP.has(w.toLowerCase())).length<3)return null;
+ return {text:out,start,end,before,after};
+}
+function qgTarget(x,P,lvl,ban){
+ const beg=lvl==='Beginner',adv=lvl==='Advanced',pool=[];
+ if(x.def&&P.byK[x.def.k])pool.push(P.byK[x.def.k]);
+ x.c.forEach(t=>{if(!pool.includes(t))pool.push(t)});
+ let best=null,bs=-1e9;
+ pool.forEach(t=>{
+  if(ban.has(t.k)||!t.noun||qgOcc(x.s,t.k)!==1)return;
+  if(x.c.some(o=>o!==t&&o.k.includes(' ')&&o.k.includes(t.k)&&qgOcc(x.s,o.k)))return;
+  if(!qgBlank(x.s,t.d))return;
+  let v=Math.log((P.nS+1)/t.df)*(beg?.6:1)+Math.random()*1.4;
+  if(P.nS>=6&&t.df/P.nS>.35)v-=3;
+  if(t.multi)v+=adv?1.2:beg?-.4:.4;
+  if(t.proper)v+=.6;
+  const last=t.k.split(' ').pop();
+  if(/(?:tion|sion|ment|ity|ism|ness|ance|ence|ology|ics|ase|ide|ure|ist|ware|work)$/.test(last))v+=.8;
+  if(/(?:ing|ed)$/.test(last))v-=1.5;
+  if(qgAdj.test(last))v-=1;
+  if(last.length>=7)v+=.4;
+  if(x.def&&t.k===x.def.k)v+=beg?3:adv?-1:1;
+  if(P.seenA.has(norm(t.d)))v-=6;
+  if(v>bs){bs=v;best=t}
+ });
+ return best;
+}
+function qgDis(P,x,T,need,lvl,b,sameTopic){
+ /* sameTopic=true is used for false statements: only swap one defined concept for a sibling concept (mitosis <-> meiosis) */
+ const sl=qgNorm(x.s),sLow=x.s.toLowerCase(),tk=T.k,kt=qgKind(T),near=P.topicTerms[x.topic];
+ const lastW=b&&b.before?(b.before.match(/(\p{L}+)\W*$/u)||[])[1]:'',nextW=b&&b.after?(b.after.match(/^\W*(\p{L}+)/u)||[])[1]:'';
+ const ok=t=>{
+  if(sameTopic&&!(t.def&&near&&near.has(t.k)))return false;
+  if(!t.noun||t.k===tk||qgKind(t)!==kt||t.k.includes(tk)||tk.includes(t.k)||t.k.slice(0,5)===tk.slice(0,5))return false;
+  if(sl.includes(' '+t.k+' ')||sLow.includes(t.k.slice(0,Math.max(5,t.k.length-2))))return false;
+  if(P.nS>=6&&t.df/P.nS>.4)return false;
+  /* the wrong choice must not fit the same context somewhere else in the lesson */
+  if(lastW&&qgKey(lastW)&&P.low.includes(' '+lastW.toLowerCase()+' '+t.k+' '))return false;
+  if(nextW&&qgKey(nextW)&&P.low.includes(' '+t.k+' '+nextW.toLowerCase()+' '))return false;
+  return true;
+ };
+ const sc=t=>{
+  const sim=-Math.abs(t.k.length-tk.length)/6,top=near&&near.has(t.k)?1:0;
+  return lvl==='Beginner'?-top*.5+Math.random()*2:lvl==='Advanced'?sim*1.2+top*1.5+Math.random()*.6:sim*.6+top*.6+Math.random()*1.2;
+ };
+ const out=[],used=new Set([tk.slice(0,5)]);
+ for(const t of P.terms.filter(ok).sort((a,b)=>sc(b)-sc(a))){
+  const p=t.k.slice(0,5);if(used.has(p))continue;
+  used.add(p);out.push(t.d);if(out.length>=need)break;
+ }
+ return out;
+}
+
+/* ---------- 5. safe ways to make a statement false ---------- */
+function qgAnt(s){
+ for(const [a,b] of QG_ANT)for(const [p,q] of [[a,b],[b,a]]){
+  const re=new RegExp('\\b'+p+'\\b','i'),m=s.match(re);
+  if(m)return s.replace(re,m[0][0]===m[0][0].toUpperCase()?cap(q):q);
+ }
+ return null;
+}
+function qgNeg(s){
+ let m=/\b(is|are|was|were|can|will|must|should|may)\s+not\b/i.exec(s);
+ if(m)return s.slice(0,m.index)+m[1]+s.slice(m.index+m[0].length);
+ if(/\b(?:no|never|cannot)\b|n't/i.test(s))return null;
+ m=/\b(is|are|was|were|can|will|must|should|may|has|have)\b/i.exec(s);
+ if(!m)return null;
+ const w=m[0],r=w.toLowerCase()==='can'?(w[0]==='C'?'Cannot':'cannot'):w+' not';
+ return s.slice(0,m.index)+r+s.slice(m.index+w.length);
+}
+function qgNum(s){
+ const m=s.match(/\b\d+(?:\.\d+)?\b/);if(!m)return null;
+ const v=parseFloat(m[0]);let nv;
+ if(Number.isInteger(v)&&v>=1000&&v<=2100)nv=v+(Math.random()<.5?-1:1)*(3+Math.floor(Math.random()*20));
+ else if(v>=10)nv=Math.round(v*(Math.random()<.5?.5:2));
+ else nv=v+1+Math.floor(Math.random()*3);
+ return nv===v?null:s.replace(m[0],String(nv));
+}
+function qgSwap(x,P,lvl,skip){
+ const cand=!x.topic?[]:x.c.filter(t=>t.noun&&t.def&&!skip.has(t.k)&&qgOcc(x.s,t.k)===1).sort(()=>Math.random()-.5);
+ for(const T of cand){
+  const b=qgBlank(x.s,T.d);if(!b||b.start===0||/\b(?:an?|[1-9]\d*)\s*$/i.test(b.before))continue;
+  const d=qgDis(P,x,T,1,lvl,b,true)[0];if(!d)continue;
+  return {text:b.before+d+b.after,k:T.k};
+ }
+ return null;
+}
+function qgFalse(x,P,lvl,max){
+ const s=x.s,out=[],seen=new Set([s.toLowerCase()]),skip=new Set();
+ const push=r=>{
+  if(!r)return false;
+  const t=typeof r==='string'?r:r.text;
+  if(!t||seen.has(t.toLowerCase())||P.low.includes(qgNorm(t)))return false;
+  seen.add(t.toLowerCase());out.push(t);if(r.k)skip.add(r.k);return true;
+ };
+ const order=lvl==='Beginner'?['neg','ant','swap']:lvl==='Advanced'?['ant','num','swap','swap','neg']:Math.random()<.5?['swap','ant','num','neg','swap']:['ant','swap','num','neg','swap'];
+ for(const k of order){
+  if(out.length>=max)break;
+  push(k==='neg'?qgNeg(s):k==='ant'?qgAnt(s):k==='num'?qgNum(s):qgSwap(x,P,lvl,skip));
+ }
+ return out;
+}
+
+/* ---------- 6. build ONE question of a given style ---------- */
+function qgQ(x,kind,lvl,P,st,ban){
+ const s=x.s,beg=lvl==='Beginner',adv=lvl==='Advanced',nch=beg?2:3,dd=x.def;
+ const TD=dd?(P.byK[dd.k]||{k:dd.k,d:dd.term}):null;
+ const mk=(t,q,ch,a,k)=>{
+  if(ch){const sn=new Set();for(const c of ch){const nc=norm(c);if(!nc||sn.has(nc))return null;sn.add(nc)}ch=shuf(ch)}
+  const o={t,q,a,src:s,h:x.h,_k:k};if(ch)o.ch=ch;return o;
+ };
+ const B={
+  blankMC:()=>{
+   const T=qgTarget(x,P,lvl,ban);if(!T)return null;const b=qgBlank(s,T.d);if(!b)return null;
+   const ds=qgDis(P,x,T,nch,lvl,b);if(ds.length<nch)return null;
+   return mk('mc',(beg?'Fill in the blank: ':adv?'Choose the term that correctly completes the statement: ':'Choose the term that best completes the sentence: ')+b.text,[cap(T.d),...ds.map(cap)],cap(T.d),T.k);
+  },
+  blankID:()=>{
+   const T=qgTarget(x,P,lvl,ban);if(!T||T.d.split(' ').length>2||s.split(/\s+/).length<8)return null;
+   const b=qgBlank(s,T.d);if(!b)return null;
+   return mk('id',(adv?'Provide the missing term: ':'Fill in the blank: ')+b.text,null,T.d,T.k);
+  },
+  defMC:()=>{
+   if(!dd||!TD)return null;
+   const dq=dd.def,od=shuf(P.defs.filter(y=>y.k!==dd.k&&!dq.toLowerCase().includes(y.k)).map(y=>(P.byK[y.k]||{d:y.term}).d));
+   const g=qgDis(P,x,TD,nch,lvl,null).filter(d=>!dq.toLowerCase().includes(d.toLowerCase()));
+   const seen=new Set([TD.d.toLowerCase()]),ds=[];
+   for(const d of (adv?[...g,...od]:[...od,...g])){const l=d.toLowerCase();if(seen.has(l)||l.slice(0,5)===TD.d.toLowerCase().slice(0,5))continue;seen.add(l);ds.push(d);if(ds.length>=nch)break}
+   if(ds.length<nch)return null;
+   return mk('mc',(beg?'Which term means: ':'Which term matches this description: ')+'“'+cap(dq)+'”?',[cap(TD.d),...ds.map(cap)],cap(TD.d),dd.k);
+  },
+  defID:()=>{
+   if(!dd||!TD)return null;
+   return mk('id',(beg?'What term means: ':adv?'Name the term that fits this description: ':'What term is described here: ')+'“'+cap(dd.def)+'”?',null,TD.d,dd.k);
+  },
+  termDef:()=>{
+   if(!dd||beg)return null;
+   const od=P.defs.filter(y=>y.k!==dd.k&&!y.def.toLowerCase().includes(dd.k)&&!dd.def.toLowerCase().includes(y.k));
+   if(od.length<3)return null;
+   const wds=d=>d.toLowerCase().split(/\W+/).filter(Boolean),dw=new Set(wds(dd.def));
+   const sim=y=>{const b=wds(y.def);return b.filter(w=>dw.has(w)).length/(b.length+1)},lenD=y=>Math.abs(y.def.length-dd.def.length);
+   const pick=adv?od.slice().sort((a,b)=>sim(b)-sim(a)||lenD(a)-lenD(b)).slice(0,6):od.slice().sort((a,b)=>lenD(a)-lenD(b)).slice(0,6);
+   const right=cap(dd.def),ds=shuf(pick).slice(0,3).map(y=>cap(y.def));
+   return mk('mc',adv?`Which of the following most accurately describes ${TD.d}?`:`According to the lesson, which of the following best describes ${TD.d}?`,[right,...ds],right,dd.k);
+  },
+  which:()=>{
+   if(s.length>220)return null;
+   const w=qgFalse(x,P,lvl,3);if(w.length<3)return null;
+   return mk('mc','Which of the following statements is correct?',[s,...w].map(cap),cap(s),x.c[0]?x.c[0].k:s.slice(0,8));
+  },
+  notTrue:()=>{
+   if(s.length>200)return null;
+   const bad=qgFalse(x,P,lvl,1)[0];if(!bad)return null;
+   const oth=P.sents.filter(o=>o!==x&&o.s.length<=200);
+   const tr=[...shuf(oth.filter(o=>o.topic===x.topic)),...shuf(oth.filter(o=>o.topic!==x.topic))].slice(0,3).map(o=>o.s);
+   if(tr.length<3)return null;
+   return mk('mc','Which of the following statements is NOT correct?',[bad,...tr].map(cap),cap(bad),x.c[0]?x.c[0].k:s.slice(0,8));
+  },
+  tf:()=>{
+   let stmt=s,ans='True';
+   if(st.tf%2===1){const f=qgFalse(x,P,lvl,1)[0];if(f){stmt=f;ans='False'}}
+   st.tf++;
+   return mk('tf',(adv?'Decide whether this statement is accurate: ':'True or False: ')+cap(stmt),null,ans,x.c[0]?x.c[0].k:s.slice(0,8));
+  }
+ };
+ return B[kind]?B[kind]():null;
+}
+
+/* ---------- 7. generate(): same signature as before, plus optional retake options ---------- */
+function generate(text,n,types,level,opt){
+ opt=opt||{};
+ const lvl=LEVELS.includes(level)?level:'Intermediate',P=qgPrep(text),cs=P.sents;
+ const bad='Could not find enough clean lesson sentences to build questions. Make sure the lesson has full sentences (not only titles, lists or a worksheet header).';
+ if(!cs.length)return {qs:[],note:bad,concepts:P.concepts};
+ const M=g2mem[g2hash(text)]||(g2mem[g2hash(text)]={sent:new Set(),ans:new Set()});
+ let usedH,avoidQ=[];
+ if(opt.retake){usedH=new Set((opt.avoidH||[]).map(String));P.seenA=new Set((opt.avoidA||[]).map(norm));avoidQ=opt.avoidQ||[]}
+ else{
+  if(M.sent.size>=cs.length*.7){M.sent.clear();M.ans.clear()}
+  const old=new Set();
+  S.activities.forEach(a=>(a.qs||[]).forEach(q=>{if(q&&q.t!=='tf'&&q.a)old.add(norm(q.a))}));
+  usedH=M.sent;P.seenA=new Set([...M.ans,...old]);
+ }
+ const qTxt=new Set(avoidQ),prevW=avoidQ.map(q=>new Set(qgW(q)));
+ const reject=(q,x)=>{
+  if(qTxt.has(q.q))return true;
+  if(!opt.retake)return false;
+  if(opt.tier>=3)return false;
+  if(opt.tier!==2){const w=qgW(q.q);if(w.length>=3&&prevW.some(S2=>w.filter(y=>S2.has(y)).length/w.length>=.6))return true}
+  if(q.t!=='tf'&&P.seenA.has(norm(q.a)))return true;
+  if(usedH.has(String(x.h))&&q.t==='tf')return true;
+  return false;
+ };
+ const slots=Array.from({length:n},(_,i)=>types[i%types.length]),tp=types.length>1?shuf(slots):slots;
+ const out=[],usedS=new Set(),ban=new Set(),usedA=new Set(),usedQ=new Set(),st={tf:Math.floor(Math.random()*2),k:{}};
+ const sc=x=>x.f?qgLvl(x.f,lvl)+(lvl==='Beginner'&&x.topic&&(x.idx===0||P.sents[x.idx-1].topic!==x.topic)?1.5:0)-(usedH.has(String(x.h))?(opt.retake?8:50):0)+Math.random()*3:0;
+ const tryC=(x,type)=>{
+  const ks=(QG_K[lvl][type]||[]).map(k=>[k,(st.k[k]||0)+Math.random()*1.2-(x.def&&/^(def|termDef)/.test(k)?1.5:0)]).sort((a,b)=>a[1]-b[1]);
+  for(const [k] of ks){
+   const q=qgQ(x,k,lvl,P,st,ban);
+   if(!q||usedQ.has(q.q)||(q.t!=='tf'&&usedA.has(norm(q.a)))||reject(q,x))continue;
+   st.k[k]=(st.k[k]||0)+1;usedQ.add(q.q);if(q.t!=='tf')usedA.add(norm(q.a));
+   return q;
+  }
+  return null;
+ };
+ const take=x=>{const want=tp[out.length]||tp[0];let q=tryC(x,want);if(!q)for(const alt of ['tf','id','mc'])if(alt!==want&&types.includes(alt)){q=tryC(x,alt);if(q)break}if(q){out.push({q,idx:x.idx});usedS.add(x);ban.add(q._k)}return q};
+ /* pass 1: cut the lesson into as many parts as questions and take the best sentence of each part */
+ const m=Math.min(n,cs.length);
+ for(let i=0;i<m;i++){
+  const seg=cs.slice(Math.floor(i*cs.length/m),Math.floor((i+1)*cs.length/m)).filter(x=>!usedS.has(x)).map(x=>[x,sc(x)]).sort((a,b)=>b[1]-a[1]);
+  for(const [x] of seg)if(take(x))break;
+ }
+ /* pass 2: fill gaps from anywhere (same concept may repeat only if nothing else works) */
+ for(const relax of [false,true]){
+  if(out.length>=n)break;
+  if(relax)ban.clear();
+  for(const [x] of cs.filter(y=>!usedS.has(y)).map(y=>[y,sc(y)]).sort((a,b)=>b[1]-a[1])){if(out.length>=n)break;take(x)}
+ }
+ out.sort((a,b)=>a.idx-b.idx);
+ if(!opt.retake)out.forEach(o=>{M.sent.add(o.q.h);if(o.q.t!=='tf')M.ans.add(norm(o.q.a))});
+ const qs=out.map(o=>{const {_k,...q}=o.q;return q});
+ let note='';
+ if(!qs.length)note=bad;
+ else if(qs.length<n)note=`Only ${qs.length} good question(s) could be built from this lesson (you asked for ${n}). Add more lesson text for more.`;
+ return {qs,note,concepts:P.concepts};
+}
+
+/* ---------- 8. retake: a NEW set, never blocked ---------- */
+function qgRetake(a,prev){
+ const m=rtSource(a),n=a.qs.length||5;
+ const types=[...new Set(a.qs.map(q=>q.t))].filter(t=>['mc','tf','id'].includes(t));if(!types.length)types.push('mc');
+ const H=new Set(),A=new Set(),Q=new Set();
+ const add=q=>{if(!q||typeof q!=='object')return;if(q.h)H.add(String(q.h));if(q.t!=='tf'&&q.a)A.add(String(q.a));if(q.q)Q.add(q.q)};
+ a.qs.forEach(add);(prev&&prev.qs||[]).forEach(add);
+ (prev&&prev.seen||[]).forEach(e=>{
+  if(typeof e==='string'){const v=e.slice(2);if(e[0]==='h')H.add(v);else if(e[0]==='a')A.add(v);else if(e[0]==='q')Q.add(v)}
+  else add(e);
+ });
+ const text=m?(m.text||'').trim():'';
+ let out=[],same=false;
+ if(text){
+  const sc=scanMath(text),tx=text.split('\n').filter(l=>!sc.lines.has(l.trim())).join('\n');
+  const mq=mathQuestions(sc,n*2,types,a.level).filter(q=>!Q.has(q.q));
+  const mAlloc=Math.min(mq.length,Math.ceil(n/2)),need=n-mAlloc;
+  const base={retake:true,avoidH:[...H],avoidA:[...A],avoidQ:[...Q]};
+  let tq=generate(tx,need,types,a.level,{...base,tier:1}).qs;
+  if(tq.length<need){
+   const r2=generate(tx,need-tq.length,types,a.level,{...base,tier:2,avoidH:[...H,...tq.map(q=>q.h)],avoidQ:[...Q,...tq.map(q=>q.q)]});
+   tq=[...tq,...r2.qs];
+  }
+  if(tq.length<need){
+   const r3=generate(tx,need-tq.length,types,a.level,{...base,tier:3,avoidH:[...H,...tq.map(q=>q.h)],avoidQ:[...Q,...tq.map(q=>q.q)]});
+   tq=[...tq,...r3.qs];
+  }
+  out=[...tq,...mq.slice(0,mAlloc)];
+  for(const q of mq){if(out.length>=n)break;if(!out.includes(q))out.push(q)}
+ }
+ if(out.length<Math.max(1,Math.ceil(n/2))){
+  /* lesson is too short or gone: reshuffle the original questions instead of blocking the student */
+  out=shuf(a.qs.map(q=>{const o={...q};if(o.ch)o.ch=shuf(o.ch);return o}));same=true;
+ }
+ out=out.map(({src,_k,...q})=>q);
+ if(!same)out.forEach(add);
+ const seen=[...H].map(v=>'h:'+v).concat([...A].map(v=>'a:'+v),[...Q].map(v=>'q:'+v)).slice(-300);
+ return {qs:out,seen,same};
+}
+function rtFresh(a,seen){const r=qgRetake(a,{seen:seen||[]});return r.same?null:r.qs}
+
+window.startAct=function(id){
+ const a=S.activities.find(x=>x.id===id);
+ if(!a||lockedBy(a.section,a.level)){msg='Finish the previous level first (75% or higher on every activity).';render();return}
+ const sub=mySub(a);
+ if(passed(sub)){msg='You already passed this activity.';render();return}
+ if(!sub&&a.due&&new Date(a.due)<new Date()){msg='The deadline for this activity has passed.';render();return}
+ rvData=null;rvQs=null;rvSeen=null;
+ if(a.kind!=='pt'){
+  if(sub){const r=qgRetake(a,sub);rvQs=r.qs;rvSeen=r.seen}
+  else rvQs=a.qs;
+ }
+ msg='';taking=id;render();
+};
+
+/* ---------- 9. typed answers: accept plurals and a one-letter typo ---------- */
+function qgLev(a,b){
+ const d=Array.from({length:a.length+1},(_,i)=>[i]);
+ for(let j=1;j<=b.length;j++)d[0][j]=j;
+ for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)
+  d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+(a[i-1]===b[j-1]?0:1));
+ return d[a.length][b.length];
+}
+function qgClose(a,b){
+ a=norm(a);b=norm(b);
+ if(!a||!b)return false;
+ if(a===b)return true;
+ if(/\d/.test(b))return false;
+ if(a.replace(/(?:es|s)$/,'')===b.replace(/(?:es|s)$/,''))return true;
+ return (b.length>=6&&qgLev(a,b)<=1)||(b.length>=11&&qgLev(a,b)<=2);
+}
+const qgSubmitPrev=window.submitAct;
+window.submitAct=function(){
+ const a=S.activities.find(x=>x.id===taking);
+ if(a&&a.kind!=='pt'){
+  (rvQs||a.qs).forEach((q,i)=>{
+   if(q.t!=='id')return;
+   const e=document.querySelector(`[name=q${i}]`);
+   if(e&&e.value.trim()&&qgClose(e.value,q.a))e.value=q.a;
+  });
+ }
+ return qgSubmitPrev();
+};
+
+
+/* ---------- 10. math lessons: add problems the student must SOLVE (new numbers every time) ---------- */
+let qgMathText='';
+const qgScanPrev=window.scanMath;
+window.scanMath=function(t){qgMathText=String(t||'');return qgScanPrev(t)};
+const qgRI=(a,b)=>a+Math.floor(Math.random()*(b-a+1));
+const qgSupN='⁰¹²³⁴⁵⁶⁷⁸⁹';
+function qgPoly(co,asc){
+ const d=co.length-1,idx=co.map((c,i)=>i);if(asc)idx.reverse();let s='';
+ idx.forEach(i=>{
+  const c=co[i],p=d-i;if(!c)return;
+  const ab=Math.abs(c),t=p===0?String(ab):(ab===1?'':String(ab))+'x'+(p>1?qgSupN[p]:'');
+  s+=s===''?(c<0?'−':'')+t:' '+(c<0?'−':'+')+' '+t;
+ });
+ return s||'0';
+}
+const qgEv=(co,x)=>co.reduce((a,c)=>a*x+c,0);
+function qgCo(d,r){
+ const co=Array.from({length:d+1},()=>qgRI(-r,r));
+ co[0]=qgRI(1,r)*(Math.random()<.3?-1:1);
+ while(!co[d])co[d]=qgRI(-r,r);
+ return co;
+}
+function qgSolveItems(text,lvl){
+ const L=String(text||'').toLowerCase(),has=w=>new RegExp(w).test(L);
+ const strong=(L.match(/\b(?:polynomial|equation|quadratic|linear|coefficient|exponent|zeros?|roots?|slope|expression|domain|degree)s?\b/g)||[]).length;
+ if(strong<4)return [];
+ const beg=lvl==='Beginner',adv=lvl==='Advanced',r=beg?4:adv?8:6,poly=has('polynomial'),quad=has('quadratic');
+ const sg=n=>n<0?'− '+(-n):'+ '+n;
+ const G={
+  eval:()=>{const co=qgCo(beg?qgRI(1,2):adv?3:qgRI(2,3),r),a=qgRI(-3,beg?3:4),f=qgPoly(co);return {q:`Given f(x) = ${f}, find f(${a}).`,s:`If f(x) = ${f}, then f(${a}) = `,val:qgEv(co,a)}},
+  degree:()=>{const co=qgCo(qgRI(2,adv?6:4),r),f=qgPoly(co,adv);return {q:`What is the degree of the polynomial f(x) = ${f}?`,s:`The degree of f(x) = ${f} is `,val:co.length-1}},
+  lead:()=>{const co=qgCo(qgRI(2,4),r),f=qgPoly(co,!beg);return {q:`What is the leading coefficient of f(x) = ${f}?`,s:`The leading coefficient of f(x) = ${f} is `,val:co[0]}},
+  constant:()=>{const co=qgCo(qgRI(2,4),r),f=qgPoly(co,!beg);return {q:`What is the constant term of f(x) = ${f}?`,s:`The constant term of f(x) = ${f} is `,val:co[co.length-1]}},
+  remainder:()=>{const co=qgCo(3,r),c=qgRI(-3,3)||2,f=qgPoly(co);return {q:`Using the Remainder Theorem, find the remainder when f(x) = ${f} is divided by x ${sg(-c)}.`,s:`The remainder when f(x) = ${f} is divided by x ${sg(-c)} is `,val:qgEv(co,c)}},
+  sum1:()=>{const co=qgCo(qgRI(3,4),r),f=qgPoly(co);return {q:`Find the sum of the coefficients of f(x) = ${f}.`,s:`The sum of the coefficients of f(x) = ${f} is `,val:co.reduce((a,b)=>a+b,0)}},
+  root2:()=>{let p=qgRI(-5,5),q=qgRI(-5,5);while(p===q)q=qgRI(-5,5);const f=`(x ${sg(-p)})(x ${sg(-q)})`;return {q:`Find the larger zero of f(x) = ${f}.`,s:`The larger zero of f(x) = ${f} is `,val:Math.max(p,q)}},
+  quad:()=>{let p=qgRI(-6,6),q=qgRI(-6,6);while(p===q)q=qgRI(-6,6);const e=qgPoly([1,-(p+q),p*q])+' = 0';return {q:`Solve ${e}. What is the larger root?`,s:`The larger root of ${e} is x = `,val:Math.max(p,q)}},
+  lin:()=>{const x=qgRI(-8,10),a=qgRI(2,beg?5:9)*(adv&&Math.random()<.4?-1:1),b=qgRI(-9,9),c=a*x+b;return {q:`Solve for x: ${a}x ${b<0?'−':'+'} ${Math.abs(b)} = ${c}`,s:`The solution of ${a}x ${b<0?'−':'+'} ${Math.abs(b)} = ${c} is x = `,val:x}}
+ };
+ const kinds=[];
+ if(poly){kinds.push('eval','degree','lead','constant');if(!beg)kinds.push('eval');if(adv)kinds.push('remainder','sum1')}
+ else if(has('function|f\\(x\\)|domain'))kinds.push('eval');
+ if(quad||poly){if(!beg)kinds.push('root2');kinds.push('quad')}
+ if(has('linear|equation|solve|slope')||!kinds.length)kinds.push('lin');
+ const out=[],seen=new Set();
+ for(let i=0;i<60&&out.length<14;i++){const it=G[kinds[i%kinds.length]]();if(Number.isFinite(it.val)&&!seen.has(it.q)){seen.add(it.q);out.push(it)}}
+ return out;
+}
+const qgMQPrev=window.mathQuestions;
+window.mathQuestions=function(sc,n,types,lvl){
+ const base=qgMQPrev(sc,n,types,lvl),items=qgSolveItems(qgMathText,lvl);
+ if(!items.length)return base;
+ const f=v=>String(Math.round(v*1000)/1000),res=[];
+ items.forEach((it,i)=>{
+  const t=types[i%types.length],a=f(it.val);
+  if(t==='tf'){const wrong=Math.random()<.5;res.push({t:'tf',q:'True or False: '+it.s+(wrong?f(it.val+shuf([1,-1,2,-2,3])[0]):a),a:wrong?'False':'True'});return}
+  if(t==='mc'){
+   const ds=[...new Set(shuf([it.val+1,it.val-1,it.val+2,it.val-2,-it.val,it.val*2,it.val+3].filter(v=>v!==it.val)).map(f))].filter(x=>x!==a).slice(0,3);
+   if(ds.length===3){res.push({t:'mc',q:it.q,ch:shuf([a,...ds]),a});return}
+  }
+  res.push({t:'id',q:it.q,a});
+ });
+ return [...base,...res];
+};
 </script>
 </body>
 </html>
