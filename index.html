@@ -1681,6 +1681,226 @@ function generate(text,n,types,level){
  else if(qs.length<n)note=`Only ${qs.length} good question(s) could be built from this lesson (you asked for ${n}). Add more lesson text for more.`;
  return {qs,note,concepts:P.A.concepts};
 }
+</script><script>
+/* LearnITAll add-on:
+   1. Teachers upload their own activity sheets (file or link) for students
+   2. After a quiz, the student sees which items were incorrect (review)
+   3. Failed (< 75%) -> the retake is a NEW set of different questions
+   Paste in its own <script> tag right before </body>, AFTER all other add-ons.
+   (Delete the old "downloadable activity sheets" add-on if you already pasted it.) */
+
+/* ================= 1. ACTIVITY SHEETS UPLOADED BY THE TEACHER ================= */
+/* Sheets are saved in the existing "materials" collection with sheet:true, so no new Firestore rules are needed.
+   They are hidden from the normal lesson lists and shown in their own cards. */
+let shAll=false,shFile=null,shBusy=false;
+Object.defineProperty(S,'materials',{configurable:true,get(){const a=flat('mat:');return shAll?a:a.filter(m=>!m.sheet)}});
+Object.defineProperty(S,'sheets',{configurable:true,get(){return flat('mat:').filter(m=>m.sheet)}});
+
+/* the file viewer looks files up in S.materials, so let it see sheets too */
+const _shView=window.viewFile;
+window.viewFile=function(id){shAll=true;try{return _shView(id)}finally{shAll=false}};
+
+async function shRead(inp){
+ const f=inp.files[0],st=document.getElementById('shstat');
+ shFile=null;if(!f)return;
+ if(f.size>MAX_ATTACH){
+  if(st)st.textContent='This file is '+Math.round(f.size/1024)+' KB. The limit is '+Math.round(MAX_ATTACH/1024)+' KB. Compress it, or upload it to Google Drive and paste the link below.';
+  inp.value='';return;
+ }
+ shBusy=true;if(st)st.textContent='Reading file...';
+ try{
+  shFile={name:f.name,size:f.size,type:f.type||'',dataUrl:await readAs(f,'readAsDataURL')};
+  const t=document.getElementById('shT');if(t&&!t.value.trim())t.value=f.name.replace(/\.[^.]+$/,'');
+  if(st)st.textContent='Attached: '+f.name;
+ }catch(e){console.error(e);shFile=null;if(st)st.textContent='Could not read this file.'}
+ shBusy=false;
+}
+function shAdd(){
+ if(shBusy){alert('Still reading the file, please wait a moment.');return}
+ const t=val('shT').trim(),link=val('shU').trim(),note=val('shN').trim();
+ if(!t){alert('Add a title for the sheet.');return}
+ if(!val('shS')){alert('Create a section first.');return}
+ if(!shFile&&!link){alert('Attach a file or paste a link to the sheet.');return}
+ if(link&&!/^https?:\/\//i.test(link)){alert('The link must start with http:// or https://');return}
+ const p={title:t,level:val('shL'),section:val('shS'),text:note,sheet:true};
+ if(link)p.link=link;
+ if(shFile)p.fileMeta=shFile;
+ col('materials').add(p).then(()=>{shFile=null;render()}).catch(fail);
+}
+function shCard(){
+ const V=scoped(),ids=V.sections.map(s=>s.id),mine=S.sheets.filter(m=>ids.includes(m.section));
+ return `<div class="card"><h2>Upload activity sheet</h2>
+ <p class="mu">Upload your own activity sheet (PDF, Word, image...) or paste a link. Students in the section you choose can open or download it from their Lessons tab.</p>
+ <label>Title</label><input id="shT">
+ <div class="row"><div><label>Level</label><select id="shL">${LEVELS.map(l=>`<option>${l}</option>`).join('')}</select></div>
+ <div><label>Section</label><select id="shS">${V.sections.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div></div>
+ <label>Sheet file (PDF, DOCX, image, etc.)</label>
+ <input type="file" id="shF" accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,image/*" onchange="shRead(this)">
+ <div class="mu" id="shstat" style="margin-top:4px">${shFile?'Attached: '+esc(shFile.name):''}</div>
+ <label>Or link to the sheet (Google Drive, etc. Anyone with the link must be able to view it)</label><input id="shU">
+ <label>Instructions for students (optional)</label><textarea id="shN" style="min-height:70px"></textarea>
+ <button class="btn" onclick="shAdd()">Upload sheet</button></div>
+ <div class="card"><h2>Uploaded activity sheets</h2>${mine.map(m=>`<div class="q" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+ <div style="flex:1;min-width:200px"><span class="tag">${esc(m.level)}</span><b>${esc(m.title)}</b> <span class="mu">&middot; ${esc(secName(m.section))}</span>
+ ${m.text?`<div class="mu" style="white-space:pre-wrap">${esc(m.text)}</div>`:''}${fileBar(m)}
+ ${m.link&&/^https?:\/\//i.test(m.link)?`<div style="margin-top:6px"><a href="${esc(m.link)}" target="_blank" rel="noopener noreferrer">${esc(m.link)}</a></div>`:''}</div>
+ <button class="btn d" style="margin:0" onclick="if(confirm('Delete this sheet?'))delMat('${m.id}')">Delete</button></div>`).join('')||'<p class="mu">None yet.</p>'}</div>`;
+}
+const _shMat=window.Materials;
+window.Materials=function(){return _shMat()+shCard()};
+
+/* student: sheets appear under Lessons (same level locking as lessons) */
+function shStudent(){
+ const ids=S.mine.map(m=>m.section),sh=S.sheets.filter(m=>ids.includes(m.section));
+ if(!sh.length)return '';
+ return `<div class="card"><h2>Activity sheets</h2><p class="mu">Sheets from your teacher. Open or download them and follow the instructions.</p>
+ ${LEVELS.map(l=>sh.filter(m=>m.level===l).map(m=>{
+  const lk=lockedBy(m.section,l);
+  if(lk)return `<div class="q" style="opacity:.7">&#128274; <span class="tag">${l}</span><b>${esc(m.title)}</b> <span class="mu">&middot; ${esc(secName(m.section))}</span><div class="mu">Locked. Pass all ${lk} activities (75%+) in this class to unlock.</div></div>`;
+  return `<div class="q"><span class="tag">${l}</span><b>${esc(m.title)}</b> <span class="mu">&middot; ${esc(secName(m.section))}</span>
+  ${m.text?`<p style="white-space:pre-wrap">${esc(m.text)}</p>`:''}${fileBar(m)}
+  ${m.link&&/^https?:\/\//i.test(m.link)?`<div style="margin-top:8px"><a class="btn s" style="margin:0" href="${esc(m.link)}" target="_blank" rel="noopener noreferrer">Open link</a></div>`:''}</div>`;
+ }).join('')).join('')}</div>`;
+}
+const _shLessons=window.Lessons;
+window.Lessons=function(){return _shLessons()+shStudent()};
+
+/* ================= 2. REVIEW + 3. NEW QUESTION SET ON RETAKE ================= */
+let rvQs=null,rvSeen=null,rvData=null;
+
+/* same marking rules as grade(): case/punctuation ignored, numbers compared with 0.01 tolerance */
+const rvNum=s=>{s=String(s??'').replace(/^\s*[a-z]\s*=\s*/i,'').replace(/,/g,'').trim();return /^[\d\s.()+\-*\/^]+$/.test(s)?safe(()=>mEval(s)):null};
+const rvRight=(q,a)=>{const x=rvNum(a),y=rvNum(q.a);return x!==null&&y!==null?Math.abs(x-y)<=0.01:norm(a)===norm(q.a)};
+const rvWords=s=>(String(s||'').toLowerCase().match(/\p{L}{4,}|\d+/gu)||[]).filter(w=>!STOP.has(w));
+
+/* the lesson the quiz came from (linked lesson, or any lesson of the same class and level) */
+function rtSource(a){
+ let m=a.mat?S.materials.find(x=>x.id===a.mat):null;
+ if(!m||!(m.text||'').trim())m=S.materials.find(x=>x.section===a.section&&x.level===a.level&&(x.text||'').trim());
+ return m||null;
+}
+/* build a new set of questions that does not repeat anything the student already saw */
+function rtFresh(a,seen){
+ const m=rtSource(a);if(!m)return null;
+ const text=(m.text||'').trim();if(!text)return null;
+ const n=a.qs.length||5,types=[...new Set(a.qs.map(q=>q.t))].filter(t=>['mc','tf','id'].includes(t));
+ if(!types.length)types.push('mc');
+ const lvl=a.level,seenQ=new Set(seen.map(q=>q.q)),seenW=seen.map(q=>new Set(rvWords([q.q,q.a].join(' '))));
+ /* "old" = same question text, or built from (almost) the same lesson sentence as a question the student already had */
+ const old=q=>{
+  if(seenQ.has(q.q))return true;
+  if(!q.src)return false;
+  const w=rvWords(q.src);
+  return w.length>=3&&seenW.some(S2=>w.filter(x=>S2.has(x)).length/w.length>=.6);
+ };
+ const sc=scanMath(text),tx=text.split('\n').filter(l=>!sc.lines.has(l.trim())).join('\n');
+ const mq=mathQuestions(sc,n*2,types,lvl).filter(q=>!old(q));
+ const tq=generate(tx,n*3,types,lvl).qs.filter(q=>!old(q));
+ const mAlloc=Math.min(mq.length,Math.ceil(n/2));
+ let out=[...tq.slice(0,n-mAlloc),...mq.slice(0,mAlloc)];
+ for(const q of [...tq,...mq]){if(out.length>=n)break;if(!out.includes(q))out.push(q)}
+ const dup=new Set();
+ out=out.filter(q=>!dup.has(q.q)&&dup.add(q.q));
+ if(out.length<Math.max(1,Math.ceil(n/2)))return null;
+ return JSON.parse(JSON.stringify(out.map(({src,_k,...q})=>q)));
+}
+
+/* start: first try = the teacher's quiz; after a failed try = a brand new set */
+window.startAct=function(id){
+ const a=S.activities.find(x=>x.id===id);
+ if(!a||lockedBy(a.section,a.level)){msg='Finish the previous level first (75% or higher on every activity).';render();return}
+ const sub=mySub(a);
+ if(passed(sub)){msg='You already passed this activity.';render();return}
+ if(!sub&&a.due&&new Date(a.due)<new Date()){msg='The deadline for this activity has passed.';render();return}
+ rvData=null;rvQs=null;rvSeen=null;
+ if(a.kind!=='pt'){
+  if(sub){
+   const seen=[...(sub.seen||[]),...(sub.qs||a.qs)],f=rtFresh(a,seen);
+   if(!f){msg='A new set of questions could not be made from this lesson (it may be short or removed). Please ask your teacher for help.';render();return}
+   rvQs=f;rvSeen=seen;
+  }else rvQs=a.qs;
+ }
+ msg='';taking=id;render();
+};
+
+/* quiz page (uses the question set chosen above) */
+const _rvTake=window.takeView;
+window.takeView=function(){
+ const a=S.activities.find(x=>x.id===taking);
+ if(!a||a.kind==='pt')return _rvTake();
+ const qs=rvQs||a.qs,sub=mySub(a);
+ return `<div class="card"><h2>${esc(a.title)}</h2>
+ ${rvSeen?`<div class="mu">Attempt ${((sub&&sub.attempt)||1)+1} &middot; this is a new set of questions</div>`:''}
+ ${qs.map((q,i)=>`<div class="q"><b>${i+1}. ${esc(q.q)}</b>
+ ${q.t==='mc'?q.ch.map(c=>`<label class="opt"><input type="radio" name="q${i}" value="${esc(c)}">${esc(c)}</label>`).join('')
+ :q.t==='tf'?['True','False'].map(c=>`<label class="opt"><input type="radio" name="q${i}" value="${c}">${c}</label>`).join('')
+ :`<input name="q${i}" placeholder="Your answer">`}</div>`).join('')}
+ <button class="btn" onclick="submitAct()">Submit</button> <button class="btn s" onclick="taking=null;rvQs=null;rvSeen=null;render()">Cancel</button></div>`;
+};
+
+/* submit: grade against the set the student actually got, then show the review */
+const _rvSubmit=window.submitAct;
+window.submitAct=function(){
+ const a=S.activities.find(x=>x.id===taking);
+ if(!a||a.kind==='pt')return _rvSubmit();
+ if(passed(mySub(a))){taking=null;render();return}
+ const qs=rvQs||a.qs,prev=mySub(a);
+ const ans=qs.map((q,i)=>{
+  if(q.t==='id'){const e=document.querySelector(`[name=q${i}]`);return e?e.value:''}
+  const c=document.querySelector(`[name=q${i}]:checked`);return c?c.value:'';});
+ const score=qs.filter((q,i)=>rvRight(q,ans[i])).length;
+ const doc={act:a.id,section:a.section,student:me.id,answers:ans,score,total:qs.length,at:Date.now()};
+ if(rvSeen){doc.qs=qs;doc.seen=rvSeen;doc.attempt=((prev&&prev.attempt)||1)+1} /* retake sets are saved so the review matches */
+ col('subs').doc(a.id+'_'+me.id).set(doc).catch(fail);
+ rvData={a,qs,ans,score,total:qs.length};
+ taking=null;rvQs=null;rvSeen=null;tab='My Scores';render();
+};
+
+/* review screen */
+function rvView(d){
+ const {a,qs,ans,score,total}=d,ok=total>0&&score/total>=PASS,pct=total?Math.round(score/total*100):0;
+ const wrong=qs.map((q,i)=>rvRight(q,ans[i])?0:i+1).filter(Boolean);
+ return `<div class="card"><h2>${esc(a.title)}: Review</h2>
+ <div class="big ${ok?'ok':'bad'}">${score}/${total} (${pct}%)</div>
+ <p class="${ok?'ok':'bad'}"><b>${ok?'Passed!':'Not passed yet. You need 75% to continue.'}</b></p>
+ ${wrong.length?`<p>Items to review: ${wrong.map(n=>`<span class="chip" style="border-color:var(--bad)">#${n}</span>`).join('')}</p>`:'<p class="ok">Perfect! No incorrect items.</p>'}
+ ${ok?'':'<p class="mu">When you retake it, you will get a new set of different questions.</p>'}
+ ${qs.map((q,i)=>{const mine=ans[i]||'',right=rvRight(q,mine),c=right?'var(--ok)':'var(--bad)';
+  return `<div class="q" style="border-color:${c}"><span class="tag" style="background:${c}">${right?'Correct':'Incorrect'}</span><b>${i+1}. ${esc(q.q)}</b>
+  <div style="margin-top:6px">Your answer: <b class="${right?'ok':'bad'}">${esc(mine)||'(no answer)'}</b></div>
+  ${right?'':`<div>Correct answer: <b class="ok">${esc(q.a)}</b></div>`}</div>`}).join('')}
+ ${ok?'':`<button class="btn" onclick="rvData=null;startAct('${a.id}')">Retake with new questions</button> `}<button class="btn s" onclick="rvData=null;render()">Back to scores</button></div>`;
+}
+function rvOpen(subId){
+ const s=S.subs.find(x=>x.id===subId),a=s&&S.activities.find(x=>x.id===s.act);
+ if(!a)return;
+ rvData={a,qs:s.qs||a.qs,ans:s.answers||[],score:s.score,total:s.total};render();
+}
+const _rvBody=window.body;
+window.body=function(){return rvData&&curMode()==='student'?rvView(rvData):_rvBody()};
+const _rvGo=window.go;
+window.go=function(t){rvData=null;rvQs=null;rvSeen=null;_rvGo(t)};
+const _rvSwitch=window.switchMode;
+window.switchMode=function(){rvData=null;_rvSwitch()};
+
+/* My Scores: Review button + pass/fail + attempt number */
+window.MyScores=function(){
+ const mine=S.subs.filter(s=>s.student===me.id);
+ return `<div class="card"><h2>My scores</h2><table><tr><th>Activity</th><th>Score</th><th></th></tr>
+ ${mine.map(s=>{const a=S.activities.find(x=>x.id===s.act),can=a&&a.kind!=='pt'&&!s.pending;
+  return `<tr><td>${esc(a&&a.title)}${s.attempt>1?` <span class="mu">(attempt ${s.attempt})</span>`:''}</td>
+  <td>${s.pending?'<span class="mu">Awaiting grading</span>':s.score+'/'+s.total+(passed(s)?' <span class="ok">Passed</span>':' <span class="bad">Not passed</span>')}</td>
+  <td>${can?`<button class="btn s" style="margin:0;padding:5px 10px" onclick="rvOpen('${s.id}')">Review</button>`:''}</td></tr>`}).join('')||'<tr><td colspan=3 class="mu">No scores yet.</td></tr>'}</table></div>`;
+};
+
+/* activity cards: "Review answers" button, and the retake button says what it does */
+const _rvCard=window.actCard;
+window.actCard=function(a){
+ let h=_rvCard(a);const sub=mySub(a);
+ if(a.kind==='pt'||!sub)return h;
+ h=h.replace('Retake activity','Retake with new questions');
+ return h.replace(/<\/div>\s*$/,`<button class="btn s" style="margin:10px 0 0 6px" onclick="rvOpen('${sub.id}')">Review answers</button></div>`);
+};
 </script>
 </body>
 </html>
