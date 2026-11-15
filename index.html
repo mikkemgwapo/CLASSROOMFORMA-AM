@@ -1681,6 +1681,97 @@ function generate(text,n,types,level){
  else if(qs.length<n)note=`Only ${qs.length} good question(s) could be built from this lesson (you asked for ${n}). Add more lesson text for more.`;
  return {qs,note,concepts:P.A.concepts};
 }
+</script><script>
+/* LearnITAll add-on: downloadable activity sheets
+   - Teacher (Activities tab): Download sheet, Answer key, Print / PDF
+   - Student (any unlocked activity card): Download sheet, Print / PDF
+   - Works for quizzes AND performance tasks. Files open in Word (.doc). No extra libraries needed.
+   Paste this in its own <script> tag right before </body>, after the other add-ons. */
+
+function dlBuild(a,key){
+ const sec=esc(secName(a.section)),L=['A','B','C','D','E','F'];
+ const due=a.due?new Date(a.due).toLocaleString():'No deadline';
+ let h=`<h1 style="margin:0 0 4px">${esc(a.title)}${key?' &mdash; ANSWER KEY':''}</h1>
+ <p style="margin:0 0 10px;color:#555">${sec} &middot; Level: ${esc(a.level)} &middot; Due: ${esc(due)}</p>`;
+ if(!key)h+=`<table style="width:100%;border-collapse:collapse;margin-bottom:12px"><tr>
+  <td style="padding:6px 0">Name: ______________________________</td>
+  <td style="padding:6px 0">Date: ________________</td>
+  <td style="padding:6px 0">Score: ______ / ${a.kind==='pt'?ptTot(a.pt):a.qs.length}</td></tr></table>`;
+
+ if(a.kind==='pt'){
+  const p=a.pt,R=p.rubric||[];
+  h+=`<table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;width:100%">
+  <tr><th align="left" width="120">Goal</th><td>${esc(p.goal)}</td></tr>
+  <tr><th align="left">Role</th><td>${esc(p.role)}</td></tr>
+  <tr><th align="left">Audience</th><td>${esc(p.audience)}</td></tr>
+  <tr><th align="left">Situation</th><td>${esc(p.situation)}</td></tr>
+  <tr><th align="left">Product</th><td>${esc(p.product)}</td></tr></table>
+  <h3>What you need to do</h3><ol>${p.task.map(t=>`<li>${esc(t)}</li>`).join('')}</ol>
+  <h3>Rubric (${ptTot(p)} points, 75% to pass)</h3>
+  <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;width:100%">
+  <tr><th align="left">Criteria</th><th align="left">Full points look like</th><th>Points</th><th>Score</th></tr>
+  ${R.map(r=>`<tr><td><b>${esc(r.c)}</b></td><td>${esc(r.d)}</td><td align="center">${r.pts}</td><td width="60"></td></tr>`).join('')}</table>`;
+  if(!key)h+=`<h3>Your answer / explanation</h3>${'<p style="border-bottom:1px solid #000;height:26px">&nbsp;</p>'.repeat(12)}`;
+  return h;
+ }
+
+ h+=`<p><i>${key?'Correct answers are shown below.':'Read each item carefully. Choose or write the best answer.'}</i></p>`;
+ a.qs.forEach((q,i)=>{
+  h+=`<div style="margin:12px 0;page-break-inside:avoid"><b>${i+1}. ${esc(q.q)}</b>`;
+  if(q.t==='mc'){
+   h+=(q.ch||[]).map((c,j)=>`<div style="margin:3px 0 3px 22px">${L[j]||j+1}. ${esc(c)}</div>`).join('');
+   if(key){const j=(q.ch||[]).findIndex(c=>norm(c)===norm(q.a));h+=`<div style="margin:4px 0 0 22px;color:#15803d"><b>Answer: ${j>=0?L[j]+'. ':''}${esc(q.a)}</b></div>`}
+   else h+=`<div style="margin:6px 0 0 22px">Answer: ______</div>`;
+  }else if(q.t==='tf'){
+   h+=key?`<div style="margin:4px 0 0 22px;color:#15803d"><b>Answer: ${esc(q.a)}</b></div>`:`<div style="margin:4px 0 0 22px">Answer (True / False): ______________</div>`;
+  }else{
+   h+=key?`<div style="margin:4px 0 0 22px;color:#15803d"><b>Answer: ${esc(q.a)}</b></div>`:`<div style="margin:4px 0 0 22px">Answer: ______________________________</div>`;
+  }
+  h+='</div>';
+ });
+ return h;
+}
+
+function dlPage(a,key){
+ return `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><title>${esc(a.title)}</title>
+ <style>body{font-family:Calibri,Arial,sans-serif;font-size:12pt;color:#000;max-width:780px;margin:24px auto;padding:0 16px}h1{font-size:20pt}h3{margin:16px 0 6px}th,td{vertical-align:top}</style></head><body>${dlBuild(a,key)}</body></html>`;
+}
+
+function dlSheet(id,key){
+ const a=S.activities.find(x=>x.id===id);if(!a)return;
+ if(curMode()==='student'&&lockedBy(a.section,a.level)){alert('Finish the previous level first.');return}
+ const blob=new Blob(['\ufeff',dlPage(a,key)],{type:'application/msword'}),url=URL.createObjectURL(blob);
+ const el=document.createElement('a'),nm=(a.title||'activity').replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'_')||'activity';
+ el.href=url;el.download=nm+(key?'_ANSWER_KEY':'_sheet')+'.doc';
+ document.body.appendChild(el);el.click();el.remove();
+ setTimeout(()=>URL.revokeObjectURL(url),4000);
+}
+function dlPrint(id,key){
+ const a=S.activities.find(x=>x.id===id);if(!a)return;
+ if(curMode()==='student'&&lockedBy(a.section,a.level)){alert('Finish the previous level first.');return}
+ const w=window.open('','_blank');
+ if(!w){alert('Your browser blocked the print window. Allow pop-ups for this site, or use Download sheet instead.');return}
+ w.document.open();w.document.write(dlPage(a,key));w.document.close();
+ setTimeout(()=>{w.focus();w.print()},400);
+}
+
+const dlBtn='margin:10px 6px 0 0;padding:7px 12px';
+const dlTeacher=id=>`<button class="btn s" style="${dlBtn}" onclick="dlSheet('${id}',false)">Download sheet</button><button class="btn s" style="${dlBtn}" onclick="dlSheet('${id}',true)">Answer key</button><button class="btn s" style="${dlBtn}" onclick="dlPrint('${id}',false)">Print / PDF</button>`;
+
+/* teacher: add the buttons next to Delete on every activity */
+const _dlActs=window.Activities;
+window.Activities=function(){
+ return _dlActs().replace(/<button class="btn d" onclick="delAct\('([^']+)'\)">Delete<\/button>/g,(m,id)=>dlTeacher(id)+m);
+};
+
+/* student: add Download / Print on every unlocked activity card */
+const _dlCard=window.actCard;
+window.actCard=function(a){
+ const h=_dlCard(a);
+ if(lockedBy(a.section,a.level))return h;
+ const btns=`<div><button class="btn s" style="${dlBtn}" onclick="dlSheet('${a.id}',false)">Download sheet</button><button class="btn s" style="${dlBtn}" onclick="dlPrint('${a.id}',false)">Print / PDF</button></div>`;
+ return h.replace(/<\/div>\s*$/,btns+'</div>');
+};
 </script>
 </body>
 </html>
